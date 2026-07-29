@@ -1,843 +1,427 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { 
-  Home, Clock, Pill, Calendar, BarChart2, Bell, 
-  CheckCircle, AlertTriangle, AlertCircle, Eye, 
-  Plus, Trash2, Edit2, Type, RefreshCw, Send, X, Filter
-} from 'lucide-react';
-import { 
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid 
-} from 'recharts';
-import { supabase } from '@/lib/supabase';
+import { useState, useEffect } from 'react';
+import { createClient } from '@supabase/supabase-js';
 
-// --- Interfaces ให้ตรงกับ SQL Schema ---
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Types
 interface UserProfile {
-  id: string; // UUID จาก Supabase
-  line_user_id: string;
+  id: string;
   name: string;
+  phone?: string;
+  line_user_id: string;
+  caregiver_line_id?: string;
+  device_id: string;
   pictureUrl?: string;
 }
 
 interface Medicine {
   id: string;
-  user_id: string;
   name: string;
   total_pills: number;
   remaining_pills: number;
-  expire_date: string;
+  expire_date?: string;
 }
 
 interface Schedule {
   id: string;
-  user_id: string;
-  medicine_id: string;
   time: string;
-  days_of_week: string[];
   dose_amount: number;
-  active: boolean;
-  medicines?: { name: string };
+  days_of_week: string[];
+  medicines?: { name: string } | null;
 }
 
 interface Log {
   id: string;
-  user_id: string;
   scheduled_time: string;
+  actual_time?: string;
   status: 'taken' | 'missed' | 'pending';
-  image_url?: string;
-  medicines?: { name: string };
+  medicines?: { name: string } | null;
 }
 
-export default function HomePage() {
-  const [activeTab, setActiveTab] = useState('overview');
-  const [isLargeFont, setIsLargeFont] = useState(true);
-  const [loading, setLoading] = useState(true);
+export default function Home() {
+  const [loading, setLoading] = useState<boolean>(true);
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
+  const [user, setUser] = useState<UserProfile | null>(null);
   
-  const [dbUser, setDbUser] = useState<UserProfile | null>(null);
+  // State ควบคุมว่าจะแสดงหน้าลงทะเบียนหรือไม่
+  const [needsRegistration, setNeedsRegistration] = useState<boolean>(false);
+
+  const [lineUserId, setLineUserId] = useState<string>('');
+  const [userPicture, setUserPicture] = useState<string>('');
+
+  // Dashboard Data
   const [medicines, setMedicines] = useState<Medicine[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
 
-  // Filters
-  const [filterDate, setFilterDate] = useState('');
-  const [filterPill, setFilterPill] = useState('all');
-  const [filterStatus, setFilterStatus] = useState('all');
-
-  // Modals
-  const [isAddMedOpen, setIsAddMedOpen] = useState(false);
-  const [editingMed, setEditingMed] = useState<Medicine | null>(null);
-  const [medForm, setMedForm] = useState({ name: '', total_pills: 30, remaining_pills: 30, expire_date: '' });
-
-  const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
-  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
-  const [scheduleForm, setScheduleForm] = useState({ medicine_id: '', time: '08:00:00', dose_amount: 1, active: true });
-
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [lineTestStatus, setLineTestStatus] = useState<string | null>(null);
-
-  // 1. LIFF & Get or Create Supabase User
-  useEffect(() => {
-    const initApp = async () => {
-      try {
-        const liffModule = (await import('@line/liff')).default;
-        const liffId = process.env.NEXT_PUBLIC_LIFF_ID || "2010881248-4xHWQGRQ";
-
-        await liffModule.init({ liffId, withLoginOnExternalBrowser: true });
-
-        if (liffModule.isLoggedIn()) {
-          const profile = await liffModule.getProfile();
-          await syncUserWithSupabase(profile.userId, profile.displayName, profile.pictureUrl);
-        } else {
-          liffModule.login();
-        }
-      } catch (error) {
-        console.error("LIFF / Init Error:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    if (typeof window !== 'undefined') {
-      initApp();
-    }
-  }, []);
-
-  // Sync / Auto Register User in Supabase `users` table
-  const syncUserWithSupabase = async (lineUserId: string, name: string, pictureUrl?: string) => {
-    try {
-      let { data: user, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('line_user_id', lineUserId)
-        .maybeSingle();
-
-      if (!user) {
-        // Auto create user if not exists
-        const { data: newUser, error: createError } = await supabase
-          .from('users')
-          .insert([{ 
-            line_user_id: lineUserId, 
-            name: name,
-            device_id: `DEV-${lineUserId.slice(-6)}`
-          }])
-          .select()
-          .single();
-
-        if (createError) throw createError;
-        user = newUser;
-      }
-
-      if (user) {
-        const userObj = { ...user, pictureUrl };
-        setDbUser(userObj);
-        await fetchUserData(user.id);
-      }
-    } catch (err) {
-      console.error("User Sync Error:", err);
-    }
-  };
-
-  // Fetch Data from DB
-  const fetchUserData = async (userId: string) => {
-    try {
-      const { data: medData } = await supabase.from('medicines').select('*').eq('user_id', userId);
-      if (medData) {
-        setMedicines(medData);
-        if (medData.length > 0) setScheduleForm(prev => ({ ...prev, medicine_id: medData[0].id }));
-      }
-
-      const { data: schData } = await supabase
-        .from('schedules')
-        .select('*, medicines(name)')
-        .eq('user_id', userId);
-      if (schData) setSchedules(schData as any);
-
-      const { data: logData } = await supabase
-        .from('logs')
-        .select('*, medicines(name)')
-        .eq('user_id', userId)
-        .order('scheduled_time', { ascending: false });
-      if (logData) setLogs(logData as any);
-    } catch (err) {
-      console.error("Fetch Data Error:", err);
-    }
-  };
-
-  // --- Medicine Handlers ---
-  const handleSaveMedicine = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!dbUser) return alert("ไม่พบข้อมูลผู้ใช้");
-
-    if (editingMed) {
-      const { error } = await supabase.from('medicines').update({
-        name: medForm.name,
-        total_pills: medForm.total_pills,
-        remaining_pills: medForm.remaining_pills,
-        expire_date: medForm.expire_date || null
-      }).eq('id', editingMed.id);
-
-      if (!error) fetchUserData(dbUser.id);
-    } else {
-      const { error } = await supabase.from('medicines').insert([{
-        user_id: dbUser.id,
-        name: medForm.name,
-        total_pills: medForm.total_pills,
-        remaining_pills: medForm.remaining_pills,
-        expire_date: medForm.expire_date || null
-      }]);
-
-      if (!error) fetchUserData(dbUser.id);
-      else console.error("Insert Med Error:", error);
-    }
-    closeMedModal();
-  };
-
-  const handleDeleteMedicine = async (id: string) => {
-    if (!confirm("คุณต้องการลบรายการยานี้ใช่หรือไม่?") || !dbUser) return;
-    const { error } = await supabase.from('medicines').delete().eq('id', id);
-    if (!error) fetchUserData(dbUser.id);
-  };
-
-  const openMedModal = (med?: Medicine) => {
-    if (med) {
-      setEditingMed(med);
-      setMedForm({ name: med.name, total_pills: med.total_pills, remaining_pills: med.remaining_pills, expire_date: med.expire_date || '' });
-    } else {
-      setEditingMed(null);
-      setMedForm({ name: '', total_pills: 30, remaining_pills: 30, expire_date: '' });
-    }
-    setIsAddMedOpen(true);
-  };
-
-  const closeMedModal = () => {
-    setIsAddMedOpen(false);
-    setEditingMed(null);
-  };
-
-  // --- Schedule Handlers ---
-  const handleSaveSchedule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!dbUser) return alert("ไม่พบข้อมูลผู้ใช้");
-
-    const timeFormatted = scheduleForm.time.length === 5 ? `${scheduleForm.time}:00` : scheduleForm.time;
-
-    if (editingSchedule) {
-      const { error } = await supabase.from('schedules').update({
-        medicine_id: scheduleForm.medicine_id,
-        time: timeFormatted,
-        dose_amount: scheduleForm.dose_amount,
-        active: scheduleForm.active
-      }).eq('id', editingSchedule.id);
-
-      if (!error) fetchUserData(dbUser.id);
-    } else {
-      const { error } = await supabase.from('schedules').insert([{
-        user_id: dbUser.id,
-        medicine_id: scheduleForm.medicine_id,
-        time: timeFormatted,
-        days_of_week: ['daily'],
-        dose_amount: scheduleForm.dose_amount,
-        active: scheduleForm.active
-      }]);
-
-      if (!error) fetchUserData(dbUser.id);
-      else console.error("Insert Schedule Error:", error);
-    }
-    closeScheduleModal();
-  };
-
-  const handleDeleteSchedule = async (id: string) => {
-    if (!confirm("คุณต้องการลบเวลาเตือนนี้ใช่หรือไม่?") || !dbUser) return;
-    const { error } = await supabase.from('schedules').delete().eq('id', id);
-    if (!error) fetchUserData(dbUser.id);
-  };
-
-  const openScheduleModal = (sch?: Schedule) => {
-    if (sch) {
-      setEditingSchedule(sch);
-      setScheduleForm({ medicine_id: sch.medicine_id, time: sch.time, dose_amount: sch.dose_amount, active: sch.active });
-    } else {
-      setEditingSchedule(null);
-      setScheduleForm({ medicine_id: medicines[0]?.id || '', time: '08:00:00', dose_amount: 1, active: true });
-    }
-    setIsScheduleModalOpen(true);
-  };
-
-  const closeScheduleModal = () => {
-    setIsScheduleModalOpen(false);
-    setEditingSchedule(null);
-  };
-
-  // --- Test LINE Alert ---
-  const handleTestLineAlert = async () => {
-    setLineTestStatus('sending');
-    try {
-      const res = await fetch('/api/cron/check-schedule', { method: 'GET' });
-      if (res.ok) setLineTestStatus('success');
-      else setLineTestStatus('error');
-    } catch {
-      setLineTestStatus('error');
-    } 
-    setTimeout(() => setLineTestStatus(null), 4000);
-  };
-
-  // Calculations
-  const adherenceRate = logs.length > 0 
-    ? Math.round((logs.filter(l => l.status === 'taken').length / logs.length) * 100) 
-    : 100;
-
-  const lowStockCount = medicines.filter(m => m.remaining_pills <= 5).length;
-  const todayStr = new Date().toISOString().split('T')[0];
-  const expiringCount = medicines.filter(m => m.expire_date && m.expire_date <= todayStr).length;
-
-  const filteredLogs = logs.filter(log => {
-    const matchesDate = filterDate ? log.scheduled_time.startsWith(filterDate) : true;
-    const matchesPill = filterPill !== 'all' ? log.medicines?.name === filterPill : true;
-    const matchesStatus = filterStatus !== 'all' ? log.status === filterStatus : true;
-    return matchesDate && matchesPill && matchesStatus;
+  // Register Form
+  const [form, setForm] = useState({
+    name: '',
+    phone: '',
+    caregiver_line_id: '',
   });
 
-  const weeklyData = [
-    { day: 'จ.', rate: 100 },
-    { day: 'อ.', rate: 80 },
-    { day: 'พ.', rate: 100 },
-    { day: 'พฤ.', rate: 60 },
-    { day: 'ศ.', rate: 100 },
-    { day: 'ส.', rate: 100 },
-    { day: 'อา.', rate: adherenceRate }
-  ];
+  useEffect(() => {
+    initLiff();
+  }, []);
 
-  const fontSizeClass = isLargeFont ? 'text-lg md:text-xl' : 'text-base';
-  const headingSizeClass = isLargeFont ? 'text-2xl md:text-3xl' : 'text-xl';
+  const initLiff = async () => {
+    try {
+      const liff = (await import('@line/liff')).default;
+      const liffId = process.env.NEXT_PUBLIC_LIFF_ID || '';
 
+      if (liffId) {
+        await liff.init({ liffId });
+        if (liff.isLoggedIn()) {
+          setIsLoggedIn(true);
+          await checkUserAndRoute(liff);
+        } else {
+          setIsLoggedIn(false);
+          setLoading(false);
+        }
+      } else {
+        setLoading(false);
+      }
+    } catch (error) {
+      console.error('LIFF Init Error:', error);
+      setLoading(false);
+    }
+  };
+
+  const handleLineLogin = async () => {
+    try {
+      const liff = (await import('@line/liff')).default;
+      if (!liff.isLoggedIn()) {
+        liff.login({ redirectUri: window.location.href });
+      } else {
+        setIsLoggedIn(true);
+        await checkUserAndRoute(liff);
+      }
+    } catch (error) {
+      console.error('LINE Login Error:', error);
+    }
+  };
+
+  // เช็กข้อมูลใน Supabase: ถ้าไม่มีข้อมูล หรือ ไม่มีเบอร์โทร -> สั่งเด้งไปหน้าลงทะเบียน
+  const checkUserAndRoute = async (liff: any) => {
+    setLoading(true);
+    try {
+      const profile = await liff.getProfile();
+      const currentLineId = profile.userId;
+
+      setLineUserId(currentLineId);
+      setUserPicture(profile.pictureUrl || '');
+
+      // ดึงข้อมูล User จากตาราง users ใน Supabase
+      const { data: dbUser, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('line_user_id', currentLineId)
+        .maybeSingle();
+
+      if (error) console.error('Error fetching user:', error);
+
+      // เงื่อนไข: ถ้ามี User และ มีเบอร์โทรศัพท์เรียบร้อย -> เข้าหน้า Dashboard
+      if (dbUser && dbUser.phone && dbUser.phone.trim() !== '') {
+        setUser({ ...dbUser, pictureUrl: profile.pictureUrl });
+        setNeedsRegistration(false);
+        await fetchDashboardData(dbUser.id);
+      } else {
+        // ถ้ายังไม่มี User ใน DB หรือ ยังไม่มีเบอร์โทรศัพท์ -> ให้เด้งไปหน้าลงทะเบียน
+        setForm({
+          name: profile.displayName || '',
+          phone: dbUser?.phone || '',
+          caregiver_line_id: dbUser?.caregiver_line_id || '',
+        });
+        setNeedsRegistration(true);
+      }
+    } catch (err) {
+      console.error('Check User Error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchDashboardData = async (userId: string) => {
+    try {
+      const { data: medData } = await supabase.from('medicines').select('*').eq('user_id', userId);
+      if (medData) setMedicines(medData);
+
+      const { data: schedData } = await supabase.from('schedules').select('*, medicines(name)').eq('user_id', userId).eq('active', true);
+      if (schedData) setSchedules(schedData as any);
+
+      const { data: logData } = await supabase.from('logs').select('*, medicines(name)').eq('user_id', userId).order('scheduled_time', { ascending: false }).limit(5);
+      if (logData) setLogs(logData as any);
+    } catch (err) {
+      console.error('Fetch Data Error:', err);
+    }
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!lineUserId) return alert('ไม่พบข้อมูล LINE User ID กรุณาล็อกอินใหม่');
+    if (!form.name.trim()) return alert('กรุณากรอกชื่อ-นามสกุล');
+    if (!form.phone.trim()) return alert('กรุณากรอกเบอร์โทรศัพท์');
+
+    setLoading(true);
+
+    try {
+      const payload = {
+        line_user_id: lineUserId,
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        caregiver_line_id: form.caregiver_line_id.trim() || null,
+        device_id: `DEV-${lineUserId.slice(-6).toUpperCase()}`,
+      };
+
+      const { data: newUser, error } = await supabase
+        .from('users')
+        .upsert([payload], { onConflict: 'line_user_id' })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      alert('ลงทะเบียนสำเร็จ!');
+      setUser({ ...newUser, pictureUrl: userPicture });
+      setNeedsRegistration(false); // ปิดหน้าลงทะเบียน แล้วย้ายไปแสดง Dashboard
+      await fetchDashboardData(newUser.id);
+    } catch (err: any) {
+      console.error('Register Error:', err);
+      alert('เกิดข้อผิดพลาดในการลงทะเบียน: ' + (err.message || ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // หน้าจอตอนกำลังโหลด
   if (loading) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 gap-3">
-        <RefreshCw className="w-10 h-10 text-emerald-600 animate-spin" />
-        <p className="text-emerald-800 font-bold text-lg">กำลังเชื่อมต่อฐานข้อมูล...</p>
+      <div className="min-h-screen w-full flex items-center justify-center bg-[#fff1f2]">
+        <div className="text-center">
+          <div className="w-10 h-10 border-4 border-[#ec4899] border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+          <p className="text-[#db2777] font-medium text-sm">กำลังตรวจสอบข้อมูล...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className={`min-h-screen bg-slate-50 text-slate-800 ${fontSizeClass} pb-12`}>
-      {/* Header */}
-      <header className="bg-emerald-600 text-white shadow-md sticky top-0 z-30">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            {dbUser?.pictureUrl ? (
-              <img src={dbUser.pictureUrl} alt="Profile" className="w-11 h-11 rounded-full border-2 border-white shadow" />
-            ) : (
-              <div className="bg-white text-emerald-600 p-2 rounded-2xl shadow">
-                <Pill className="w-7 h-7" />
-              </div>
-            )}
-            <div>
-              <h1 className="font-bold text-lg md:text-xl leading-tight">
-                สวัสดี, {dbUser?.name || 'ผู้ใช้งาน'}
-              </h1>
-              <p className="text-emerald-100 text-xs">ตลับยาอัจฉริยะ Smart Pillbox</p>
-            </div>
+    <main className="min-h-screen bg-[#fff1f2] text-slate-800 flex flex-col justify-between font-sans">
+      {/* HEADER */}
+      <header className="bg-gradient-to-r from-[#ec4899] to-[#f43f5e] text-white p-4 shadow-md flex items-center justify-between">
+        <div className="flex items-center space-x-3">
+          {userPicture ? (
+            <img src={userPicture} alt="Profile" className="w-10 h-10 rounded-full border-2 border-white/80 shadow-sm" />
+          ) : (
+            <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-lg">💊</div>
+          )}
+          <div>
+            <h1 className="font-bold text-base">
+              {user ? `สวัสดี, ${user.name}` : 'Smart Pillbox'}
+            </h1>
+            <p className="text-[11px] text-pink-100">ระบบตลับยาอัจฉริยะ</p>
           </div>
-
-          <button
-            onClick={() => setIsLargeFont(!isLargeFont)}
-            className="flex items-center gap-2 bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-2 rounded-xl border border-emerald-400/30 shadow-sm"
-          >
-            <Type className="w-5 h-5" />
-            <span className="font-bold text-sm hidden sm:inline">
-              {isLargeFont ? 'ขนาดอักษร: ใหญ่ (ก+)' : 'ขนาดอักษร: ปกติ'}
-            </span>
-          </button>
         </div>
-
-        {/* Navigation Tabs */}
-        <nav className="bg-emerald-700 border-t border-emerald-600 px-2 overflow-x-auto">
-          <div className="max-w-6xl mx-auto flex gap-1 md:gap-2">
-            {[
-              { id: 'overview', label: 'ภาพรวม', icon: Home },
-              { id: 'logs', label: 'ประวัติการกินยา', icon: Clock },
-              { id: 'inventory', label: 'จัดการคลังยา', icon: Pill },
-              { id: 'schedule', label: 'ตั้งเวลาเตือน', icon: Calendar },
-              { id: 'analytics', label: 'สถิติ & ทดสอบ', icon: BarChart2 }
-            ].map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-4 py-3 font-bold whitespace-nowrap transition border-b-4 ${
-                    isActive
-                      ? 'bg-white text-emerald-800 border-yellow-400 rounded-t-xl shadow'
-                      : 'text-emerald-100 border-transparent hover:bg-emerald-600/50'
-                  }`}
-                >
-                  <Icon className={`w-6 h-6 ${isActive ? 'text-emerald-600' : ''}`} />
-                  <span>{tab.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </nav>
+        {user?.device_id && (
+          <span className="text-[10px] bg-white/20 px-2.5 py-1 rounded-full text-white backdrop-blur-sm">
+            {user.device_id}
+          </span>
+        )}
       </header>
 
-      {/* Main Content Area */}
-      <main className="max-w-6xl mx-auto px-4 pt-6">
-
-        {/* 1. OVERVIEW */}
-        {activeTab === 'overview' && (
-          <div className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-white p-5 rounded-3xl border-2 border-emerald-200 shadow-sm flex items-center gap-4">
-                <div className="bg-emerald-100 text-emerald-700 p-4 rounded-2xl">
-                  <CheckCircle className="w-10 h-10" />
-                </div>
-                <div>
-                  <p className="text-slate-500 font-bold text-sm">กินยาตรงเวลา (Adherence)</p>
-                  <p className="text-3xl font-black text-emerald-600">{adherenceRate}%</p>
-                </div>
-              </div>
-
-              <div className="bg-white p-5 rounded-3xl border-2 border-amber-200 shadow-sm flex items-center gap-4">
-                <div className="bg-amber-100 text-amber-600 p-4 rounded-2xl">
-                  <AlertTriangle className="w-10 h-10" />
-                </div>
-                <div>
-                  <p className="text-slate-500 font-bold text-sm">ยาใกล้หมดคลัง (&le; 5 เม็ด)</p>
-                  <p className="text-3xl font-black text-amber-600">{lowStockCount} รายการ</p>
-                </div>
-              </div>
-
-              <div className="bg-white p-5 rounded-3xl border-2 border-rose-200 shadow-sm flex items-center gap-4">
-                <div className="bg-rose-100 text-rose-600 p-4 rounded-2xl">
-                  <AlertCircle className="w-10 h-10" />
-                </div>
-                <div>
-                  <p className="text-slate-500 font-bold text-sm">ยาหมดอายุ / ใกล้หมดอายุ</p>
-                  <p className="text-3xl font-black text-rose-600">{expiringCount} รายการ</p>
-                </div>
-              </div>
+      {/* CASE 1: ยังไม่ได้ Login LINE */}
+      {!isLoggedIn && (
+        <div className="flex-1 flex items-center justify-center p-6">
+          <div className="bg-white p-8 rounded-3xl shadow-xl border border-pink-100 text-center max-w-sm w-full space-y-6">
+            <div className="w-20 h-20 bg-[#fce7f3] text-[#ec4899] rounded-full flex items-center justify-center mx-auto text-4xl shadow-inner">
+              💊
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-slate-800">Smart Pillbox</h2>
+              <p className="text-xs text-slate-400 mt-1">
+                กรุณาเข้าสู่ระบบด้วย LINE เพื่อใช้งาน
+              </p>
             </div>
 
-            <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-              <h2 className={`font-bold text-slate-800 flex items-center gap-2 ${headingSizeClass}`}>
-                <Calendar className="text-emerald-600 w-8 h-8" /> ตารางการทานยาวันนี้
-              </h2>
-
-              {schedules.length === 0 ? (
-                <div className="text-center py-10 text-slate-400">
-                  <Clock className="w-12 h-12 mx-auto mb-2 opacity-40" />
-                  <p>ยังไม่มีการตั้งเวลาเตือนทานยา</p>
-                  <button onClick={() => setActiveTab('schedule')} className="mt-2 text-emerald-600 font-bold underline">
-                    + กดเพิ่มเวลาเตือนทานยา
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {schedules.map((sch) => (
-                    <div key={sch.id} className="p-4 rounded-2xl border-2 bg-slate-50 border-slate-200 flex justify-between items-center">
-                      <div className="flex items-center gap-4">
-                        <div className="px-4 py-2 rounded-xl font-black text-xl bg-emerald-600 text-white">
-                          {sch.time.slice(0, 5)} น.
-                        </div>
-                        <div>
-                          <p className="font-bold text-slate-800 text-lg">{sch.medicines?.name || 'รายการยา'}</p>
-                          <p className="text-sm text-slate-500">ครั้งละ {sch.dose_amount} เม็ด</p>
-                        </div>
-                      </div>
-                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${sch.active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-500'}`}>
-                        {sch.active ? 'เปิดเตือน' : 'ปิดเตือน'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <button
+              onClick={handleLineLogin}
+              className="w-full bg-[#06C755] hover:bg-[#05b34c] text-white font-medium py-3 px-4 rounded-2xl flex items-center justify-center space-x-2 transition shadow-lg text-sm"
+            >
+              <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24">
+                <path d="M24 10.304c0-5.369-5.383-9.738-12-9.738-6.616 0-12 4.369-12 9.738 0 4.814 4.269 8.846 10.036 9.608.391.084.922.258 1.057.592.121.303.079.778.039 1.085l-.171 1.027c-.053.303-.242 1.186 1.039.647 1.281-.54 6.911-4.069 9.428-6.967 1.739-1.907 2.572-3.844 2.572-6.002z" />
+              </svg>
+              <span>เข้าสู่ระบบด้วย LINE</span>
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* 2. HISTORY / LOGS */}
-        {activeTab === 'logs' && (
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
-            <h2 className={`font-bold text-slate-800 flex items-center gap-2 ${headingSizeClass}`}>
-              <Clock className="text-emerald-600 w-8 h-8" /> ประวัติการกินยา
-            </h2>
-
-            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
-              <div className="flex items-center gap-2 font-bold text-slate-700">
-                <Filter className="w-5 h-5 text-emerald-600" /> ตัวกรองค้นหา (Filter)
+      {/* CASE 2: เข้า LINE แล้วแต่ไม่มีเบอร์ -> เด้งเข้าหน้าลงทะเบียนทันที */}
+      {isLoggedIn && needsRegistration && (
+        <div className="flex-1 flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md rounded-3xl shadow-xl overflow-hidden border border-pink-100">
+            <div className="bg-gradient-to-r from-[#ec4899] to-[#f43f5e] p-6 text-white text-center">
+              <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-2 text-2xl">
+                📝
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1">วันที่</label>
-                  <input 
-                    type="date" 
-                    value={filterDate} 
-                    onChange={(e) => setFilterDate(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border bg-white font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1">ชื่อยา</label>
-                  <select 
-                    value={filterPill} 
-                    onChange={(e) => setFilterPill(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border bg-white font-medium"
-                  >
-                    <option value="all">ยาทั้งหมด</option>
-                    {medicines.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-1">สถานะ</label>
-                  <select 
-                    value={filterStatus} 
-                    onChange={(e) => setFilterStatus(e.target.value)}
-                    className="w-full p-2.5 rounded-xl border bg-white font-medium"
-                  >
-                    <option value="all">ทุกสถานะ</option>
-                    <option value="taken">ทานแล้ว (Taken)</option>
-                    <option value="missed">ไม่ได้ทาน/ลืม (Missed)</option>
-                    <option value="pending">รอทาน (Pending)</option>
-                  </select>
-                </div>
-              </div>
+              <h2 className="text-lg font-bold">ลงทะเบียนผู้ใช้งาน</h2>
+              <p className="text-xs text-pink-100 mt-1">
+                กรุณากรอกข้อมูลเบอร์โทรศัพท์เพื่อผูกตลับยา
+              </p>
             </div>
 
-            {filteredLogs.length === 0 ? (
-              <div className="text-center py-12 text-slate-400">
-                <Clock className="w-16 h-16 mx-auto mb-2 opacity-30" />
-                <p>ไม่พบประวัติการกินยาตามที่ค้นหา</p>
+            <form onSubmit={handleRegisterSubmit} className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  ชื่อ - นามสกุล <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="เช่น สมหญิง รักสุขภาพ"
+                  className="w-full border border-pink-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-[#ec4899] focus:outline-none"
+                />
               </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead>
-                    <tr className="border-b-2 border-slate-200 bg-slate-100">
-                      <th className="p-3 font-bold">วัน-เวลากำหนด</th>
-                      <th className="p-3 font-bold">รายการยา</th>
-                      <th className="p-3 font-bold">สถานะ</th>
-                      <th className="p-3 font-bold text-center">ภาพถ่ายหลักฐาน</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {filteredLogs.map((log) => (
-                      <tr key={log.id}>
-                        <td className="p-3 font-medium">{new Date(log.scheduled_time).toLocaleString('th-TH')}</td>
-                        <td className="p-3 font-bold text-slate-800">{log.medicines?.name || '-'}</td>
-                        <td className="p-3">
-                          <span className={`px-3 py-1 rounded-full font-bold text-xs ${
-                            log.status === 'taken' ? 'bg-emerald-100 text-emerald-800' :
-                            log.status === 'missed' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'
-                          }`}>
-                            {log.status === 'taken' ? 'ทานแล้ว' : log.status === 'missed' ? 'ลืมทาน' : 'รอทาน'}
-                          </span>
-                        </td>
-                        <td className="p-3 text-center">
-                          {log.image_url ? (
-                            <button 
-                              onClick={() => setSelectedImage(log.image_url!)} 
-                              className="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl border border-emerald-300 font-bold text-xs inline-flex items-center gap-1"
-                            >
-                              <Eye className="w-4 h-4" /> ดูภาพ
-                            </button>
-                          ) : (
-                            <span className="text-xs text-slate-400">ไม่มีภาพ</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
 
-        {/* 3. MEDICINE MANAGEMENT */}
-        {activeTab === 'inventory' && (
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className={`font-bold text-slate-800 flex items-center gap-2 ${headingSizeClass}`}>
-                <Pill className="text-emerald-600 w-8 h-8" /> จัดการคลังยาในตลับ
-              </h2>
-              <button 
-                onClick={() => openMedModal()}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2.5 rounded-2xl flex items-center gap-2 shadow text-sm"
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  เบอร์โทรศัพท์ <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="tel"
+                  required
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                  placeholder="เช่น 0812345678"
+                  className="w-full border border-pink-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-[#ec4899] focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">
+                  LINE ID ผู้ดูแล (ถ้ามี)
+                </label>
+                <input
+                  type="text"
+                  value={form.caregiver_line_id}
+                  onChange={(e) => setForm({ ...form, caregiver_line_id: e.target.value })}
+                  placeholder="สำหรับส่งแจ้งเตือนเมื่อลืมทานยา"
+                  className="w-full border border-pink-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-[#ec4899] focus:outline-none"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full mt-2 bg-[#ec4899] hover:bg-[#db2777] text-white font-medium py-3 rounded-xl transition shadow-lg shadow-pink-500/30 text-sm"
               >
-                <Plus className="w-5 h-5" /> เพิ่มรายการยา
+                บันทึกและเริ่มใช้งาน
               </button>
-            </div>
-
-            {medicines.length === 0 ? (
-              <div className="text-center py-12 text-slate-400">
-                <Pill className="w-16 h-16 mx-auto mb-2 opacity-30" />
-                <p>ยังไม่มีรายการยาในคลัง</p>
-                <button onClick={() => openMedModal()} className="mt-2 text-emerald-600 font-bold underline">
-                  + เพิ่มยาลงคลัง
-                </button>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {medicines.map((item) => {
-                  const percent = item.total_pills > 0 ? Math.round((item.remaining_pills / item.total_pills) * 100) : 0;
-                  return (
-                    <div key={item.id} className="p-5 rounded-3xl border-2 border-slate-200 bg-slate-50 space-y-3 relative">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h3 className="font-bold text-slate-800 text-xl">{item.name}</h3>
-                          <p className="text-xs text-slate-500">วันหมดอายุ: {item.expire_date || 'ไม่ได้ระบุ'}</p>
-                        </div>
-                        <div className="flex gap-1">
-                          <button onClick={() => openMedModal(item)} className="p-2 text-slate-500 hover:text-emerald-600">
-                            <Edit2 className="w-5 h-5" />
-                          </button>
-                          <button onClick={() => handleDeleteMedicine(item.id)} className="p-2 text-slate-500 hover:text-rose-600">
-                            <Trash2 className="w-5 h-5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-sm font-bold mb-1">
-                          <span>คงเหลือ: {item.remaining_pills} / {item.total_pills} เม็ด</span>
-                          <span>{percent}%</span>
-                        </div>
-                        <div className="w-full bg-slate-200 h-4 rounded-full overflow-hidden">
-                          <div 
-                            className={`h-full ${item.remaining_pills <= 5 ? 'bg-rose-500' : 'bg-emerald-500'}`} 
-                            style={{ width: `${percent}%` }}
-                          ></div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            </form>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* 4. SCHEDULE MANAGEMENT */}
-        {activeTab === 'schedule' && (
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
-            <div className="flex justify-between items-center">
-              <h2 className={`font-bold text-slate-800 flex items-center gap-2 ${headingSizeClass}`}>
-                <Calendar className="text-emerald-600 w-8 h-8" /> ตั้งเวลาแจ้งเตือนทานยา
-              </h2>
-              <button 
-                onClick={() => openScheduleModal()}
-                disabled={medicines.length === 0}
-                className="bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold px-4 py-2.5 rounded-2xl flex items-center gap-2 shadow text-sm"
-              >
-                <Plus className="w-5 h-5" /> เพิ่มเวลาเตือน
-              </button>
+      {/* CASE 3: ลงทะเบียนเรียบร้อยแล้ว -> แสดงหน้าหลัก (Dashboard สีชมพู) */}
+      {isLoggedIn && !needsRegistration && user && (
+        <div className="max-w-4xl mx-auto p-4 space-y-4 w-full flex-1 pb-8">
+          {/* Summary Cards */}
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-pink-100 text-center">
+              <p className="text-[11px] font-medium text-slate-400">ทานตรงเวลา</p>
+              <p className="text-xl font-bold text-[#ec4899] mt-1">
+                {logs.length > 0 ? Math.round((logs.filter(l => l.status === 'taken').length / logs.length) * 100) : 100}%
+              </p>
             </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-pink-100 text-center">
+              <p className="text-[11px] font-medium text-slate-400">ยาใกล้หมด</p>
+              <p className="text-xl font-bold text-[#f43f5e] mt-1">
+                {medicines.filter(m => m.remaining_pills <= 5).length} <span className="text-xs font-normal">ชนิด</span>
+              </p>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-pink-100 text-center">
+              <p className="text-[11px] font-medium text-slate-400">รายการยาทั้งหมด</p>
+              <p className="text-xl font-bold text-purple-500 mt-1">
+                {medicines.length} <span className="text-xs font-normal">ชนิด</span>
+              </p>
+            </div>
+          </div>
 
-            {medicines.length === 0 && (
-              <p className="text-rose-600 text-sm font-bold bg-rose-50 p-3 rounded-xl">⚠️ กรุณาเพิ่มรายการยาในเมนู "จัดการคลังยา" ก่อนตั้งเวลาเตือน</p>
-            )}
+          {/* Schedules Section */}
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-pink-100 space-y-3">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-slate-700 text-sm flex items-center gap-1.5">
+                <span>⏰</span> ตารางการทานยาวันนี้
+              </h3>
+              <span className="text-[10px] text-[#ec4899] bg-[#fce7f3] px-2 py-0.5 rounded-full font-medium">
+                {schedules.length} รายการ
+              </span>
+            </div>
 
             {schedules.length === 0 ? (
-              <div className="text-center py-12 text-slate-400">
-                <Calendar className="w-16 h-16 mx-auto mb-2 opacity-30" />
-                <p>ยังไม่มีการตั้งเวลาแจ้งเตือน</p>
+              <div className="text-center py-6 text-slate-400 text-xs bg-[#fff1f2]/50 rounded-xl border border-dashed border-pink-200">
+                ยังไม่มีการตั้งเวลาทานยา
               </div>
             ) : (
-              <div className="space-y-3">
-                {schedules.map((sch) => (
-                  <div key={sch.id} className="p-5 rounded-3xl border-2 border-slate-200 flex justify-between items-center bg-slate-50">
-                    <div className="flex items-center gap-4">
-                      <div className="bg-emerald-600 text-white px-4 py-2 rounded-2xl font-black text-xl">{sch.time.slice(0, 5)} น.</div>
+              <div className="space-y-2">
+                {schedules.map((item) => (
+                  <div key={item.id} className="flex items-center justify-between p-3 bg-[#fdf2f8] rounded-xl border border-pink-100">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 bg-[#ec4899] text-white rounded-xl flex items-center justify-center font-bold text-xs shadow-sm">
+                        {item.time.slice(0, 5)}
+                      </div>
                       <div>
-                        <span className="font-bold text-slate-800 text-lg">{sch.medicines?.name || 'รายการยา'}</span>
-                        <p className="text-sm text-slate-500">รับประทานครั้งละ {sch.dose_amount} เม็ด</p>
+                        <p className="font-semibold text-slate-700 text-xs">{item.medicines?.name || 'ยาไม่ระบุชื่อ'}</p>
+                        <p className="text-[10px] text-slate-400">ครั้งละ {item.dose_amount} เม็ด</p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => openScheduleModal(sch)} className="p-2 text-slate-500 hover:text-emerald-600">
-                        <Edit2 className="w-5 h-5" />
-                      </button>
-                      <button onClick={() => handleDeleteSchedule(sch.id)} className="p-2 text-slate-500 hover:text-rose-600">
-                        <Trash2 className="w-5 h-5" />
-                      </button>
+                    <span className="text-[10px] bg-white text-[#ec4899] border border-pink-200 px-2 py-0.5 rounded-md font-medium">
+                      {item.days_of_week.join(', ')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Medicines Section */}
+          <div className="bg-white p-5 rounded-2xl shadow-sm border border-pink-100 space-y-3">
+            <h3 className="font-bold text-slate-700 text-sm flex items-center gap-1.5">
+              <span>💊</span> คลังยาของคุณ
+            </h3>
+
+            {medicines.length === 0 ? (
+              <div className="text-center py-6 text-slate-400 text-xs bg-[#fff1f2]/50 rounded-xl border border-dashed border-pink-200">
+                ยังไม่มีข้อมูลยาในระบบ
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {medicines.map((med) => (
+                  <div key={med.id} className="p-3 border border-slate-100 bg-slate-50/50 rounded-xl flex justify-between items-center">
+                    <div>
+                      <p className="font-semibold text-slate-700 text-xs">{med.name}</p>
+                      <p className="text-[10px] text-slate-400">
+                        {med.expire_date ? `หมดอายุ: ${med.expire_date}` : 'ไม่ระบุวันหมดอายุ'}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className={`text-xs font-bold ${med.remaining_pills <= 5 ? 'text-[#f43f5e]' : 'text-emerald-600'}`}>
+                        {med.remaining_pills} / {med.total_pills} เม็ด
+                      </p>
                     </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
-        )}
-
-        {/* 5. ANALYTICS & TEST LINE */}
-        {activeTab === 'analytics' && (
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
-              <h2 className={`font-bold text-slate-800 flex items-center gap-2 ${headingSizeClass}`}>
-                <BarChart2 className="text-emerald-600 w-8 h-8" /> สถิติอัตราการกินยาตรงเวลา (%)
-              </h2>
-
-              <div className="h-64 w-full pt-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={weeklyData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="day" />
-                    <YAxis domain={[0, 100]} />
-                    <Tooltip formatter={(value: any) => [`${value}%`, 'ความตรงเวลา']} />
-                    <Bar dataKey="rate" fill="#10b981" radius={[8, 8, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            <div className="bg-white p-6 rounded-3xl border-2 border-emerald-300 shadow-sm space-y-4">
-              <h3 className="font-bold text-slate-800 text-xl flex items-center gap-2">
-                <Bell className="text-emerald-600" /> ทดสอบระบบ LINE Notification Alert
-              </h3>
-              <p className="text-sm text-slate-600 font-medium">
-                กดปุ่มด้านล่างเพื่อสั่งงาน Cron / Trigger ตรวจสอบเวลาเตือนทันที
-              </p>
-              
-              <button
-                onClick={handleTestLineAlert}
-                disabled={lineTestStatus === 'sending'}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-3.5 rounded-2xl flex items-center gap-2 shadow-lg"
-              >
-                {lineTestStatus === 'sending' ? <RefreshCw className="animate-spin" /> : <Send />} กดทดสอบยิง LINE Alert สดๆ
-              </button>
-              {lineTestStatus === 'success' && <p className="text-emerald-600 font-bold">✅ ส่งข้อความเข้า LINE สำเร็จ!</p>}
-              {lineTestStatus === 'error' && <p className="text-rose-600 font-bold">❌ เกิดข้อผิดพลาดในการส่ง (เช็ค API Route)</p>}
-            </div>
-          </div>
-        )}
-
-      </main>
-
-      {/* MODAL: เพิ่ม/แก้ไขยา */}
-      {isAddMedOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-xl text-slate-800">{editingMed ? 'แก้ไขรายการยา' : 'เพิ่มรายการยา'}</h3>
-              <button onClick={closeMedModal}><X className="w-6 h-6 text-slate-400" /></button>
-            </div>
-
-            <form onSubmit={handleSaveMedicine} className="space-y-3 text-sm">
-              <div>
-                <label className="block font-bold mb-1">ชื่อยา</label>
-                <input 
-                  type="text" 
-                  required 
-                  placeholder="เช่น พาราเซตามอล" 
-                  value={medForm.name}
-                  onChange={(e) => setMedForm({ ...medForm, name: e.target.value })}
-                  className="w-full p-3 border rounded-xl bg-slate-50"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-bold mb-1">จำนวนทั้งหมด (เม็ด)</label>
-                  <input 
-                    type="number" 
-                    value={medForm.total_pills}
-                    onChange={(e) => setMedForm({ ...medForm, total_pills: Number(e.target.value) })}
-                    className="w-full p-3 border rounded-xl bg-slate-50"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold mb-1">จำนวนคงเหลือ (เม็ด)</label>
-                  <input 
-                    type="number" 
-                    value={medForm.remaining_pills}
-                    onChange={(e) => setMedForm({ ...medForm, remaining_pills: Number(e.target.value) })}
-                    className="w-full p-3 border rounded-xl bg-slate-50"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold mb-1">วันหมดอายุ</label>
-                <input 
-                  type="date" 
-                  value={medForm.expire_date}
-                  onChange={(e) => setMedForm({ ...medForm, expire_date: e.target.value })}
-                  className="w-full p-3 border rounded-xl bg-slate-50"
-                />
-              </div>
-
-              <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-3.5 rounded-xl shadow mt-2 hover:bg-emerald-700">
-                บันทึกข้อมูลยา
-              </button>
-            </form>
-          </div>
         </div>
       )}
-
-      {/* MODAL: เพิ่ม/แก้ไขเวลาเตือน */}
-      {isScheduleModalOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white p-6 rounded-3xl max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-xl text-slate-800">{editingSchedule ? 'แก้ไขเวลาเตือน' : 'เพิ่มเวลาเตือน'}</h3>
-              <button onClick={closeScheduleModal}><X className="w-6 h-6 text-slate-400" /></button>
-            </div>
-
-            <form onSubmit={handleSaveSchedule} className="space-y-3 text-sm">
-              <div>
-                <label className="block font-bold mb-1">เลือกยาที่ต้องการเตือน</label>
-                <select 
-                  value={scheduleForm.medicine_id}
-                  onChange={(e) => setScheduleForm({ ...scheduleForm, medicine_id: e.target.value })}
-                  className="w-full p-3 border rounded-xl bg-slate-50 font-bold text-slate-800"
-                >
-                  {medicines.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-bold mb-1">เวลาเตือน</label>
-                  <input 
-                    type="time" 
-                    required 
-                    value={scheduleForm.time.slice(0, 5)}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, time: e.target.value })}
-                    className="w-full p-3 border rounded-xl bg-slate-50"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold mb-1">จำนวนที่ทาน (เม็ด)</label>
-                  <input 
-                    type="number" 
-                    min={1}
-                    value={scheduleForm.dose_amount}
-                    onChange={(e) => setScheduleForm({ ...scheduleForm, dose_amount: Number(e.target.value) })}
-                    className="w-full p-3 border rounded-xl bg-slate-50"
-                  />
-                </div>
-              </div>
-
-              <button type="submit" className="w-full bg-emerald-600 text-white font-bold py-3.5 rounded-xl shadow mt-2 hover:bg-emerald-700">
-                บันทึกเวลาเตือน
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: ดูภาพถ่ายหลักฐาน */}
-      {selectedImage && (
-        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
-          <div className="bg-white p-6 rounded-3xl max-w-lg w-full space-y-4">
-            <h3 className="font-bold text-xl">📸 ภาพถ่ายหลักฐานการเปิดกล่อง</h3>
-            <img src={selectedImage} alt="Proof" className="w-full h-auto rounded-2xl border" />
-            <button onClick={() => setSelectedImage(null)} className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl">ปิด</button>
-          </div>
-        </div>
-      )}
-
-    </div>
+    </main>
   );
 }
