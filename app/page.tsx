@@ -28,12 +28,26 @@ interface Medicine {
 
 interface Schedule {
   id: string;
-  time: string;
+  time: string; 
+  schedule_type: 'daily' | 'weekly' | 'interval'; // ประเภทการทานยา
+  days_of_week?: string[] | null; // ['mon', 'tue', ...] (ใส่ ? หรือ null เพราะอาจไม่มีถ้าเป็น interval)
+  interval_days?: number | null; // เช่น 2 (ทุกๆ 2 วัน / วันเว้นวัน)
+  start_date?: string | null; // รูปแบบ 'YYYY-MM-DD'
   dose_amount: number;
-  days_of_week: string[];
+  active?: boolean;
   medicine_id: string;
   medicines?: { name: string } | null;
+  created_at?: string;
 }
+
+//interface Schedule {
+ // id: string;
+ // time: string;
+ // dose_amount: number;
+ // days_of_week: string[];
+ // medicine_id: string;
+  //medicines?: { name: string } | null;
+//}
 
 interface Log {
   id: string;
@@ -84,11 +98,55 @@ export default function Home() {
   // Modal ถ่ายรูป/ดูรูปประวัติ
   const [selectedLogImage, setSelectedLogImage] = useState<string | null>(null);
 
+// 🛠️ 1. สร้าง Mock User ไว้ใช้งานใน Localhost
+// 🛠️ เปลี่ยนค่าใน mockUser เป็นข้อมูลจาก Supabase จริง
+const mockUser = {
+  // 1. นำ UUID จาก Supabase มาวางตรงนี้ (เพื่อให้ fetchAllData(userId) ทำงานได้ถูกต้อง)
+  id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', 
+
+  name: 'สมชาย ทดสอบระบบ',
+  phone: '0812345678',
+  
+  // 2. นำ line_user_id จริงมาวางตรงนี้
+  line_user_id: 'U1234567890abcdef1234567890abcdef', 
+  
+  caregiver_line_id: '',
+  device_id: 'BOX-LOCALTEST',
+  pictureUrl: 'https://placehold.co/100x100/06C755/white?text=Dev',
+};
+
+
+
   useEffect(() => {
     initLiff();
   }, []);
 
   const initLiff = async () => {
+
+    // 🛠️ 2. เช็กว่าถ้ารันบน Localhost ให้ล็อกอินอัตโนมัติทันที
+    if (process.env.NODE_ENV === 'development' && typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+      console.log('⚡ Localhost Mode: Testing New User Registration');
+      
+      setIsLoggedIn(true);
+      
+      // 1. จำลอง Line ID ใหม่ที่ไม่เคยมีใน Supabase (หรือสุ่มเอา)
+      const newMockLineId = 'U_TEST_NEW_USER_' + Math.floor(Math.random() * 1000);
+      setLineUserId(newMockLineId);
+      setUserPicture('https://placehold.co/100x100/06C755/white?text=New');
+    
+      // 2. ตั้งค่าให้เปิดหน้าฟอร์มลงทะเบียน
+      setUserForm({
+        name: '',
+        phone: '',
+        caregiver_line_id: '',
+      });
+      setNeedsRegistration(true); // บังคับให้เด้งไปหน้าลงทะเบียน
+      setLoading(false);
+      return;
+    }
+
+
+
     try {
       const liff = (await import('@line/liff')).default;
       const liffId = process.env.NEXT_PUBLIC_LIFF_ID || '';
@@ -221,76 +279,12 @@ export default function Home() {
   };
 
   // เพิ่มยาแบบละเอียด + ตั้งตารางเวลา
-  const handleAddMedicineFull = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
-    if (!medForm.name.trim()) return alert('กรุณาระบุชื่อยา');
-
-    setLoading(true);
-    try {
-      // 1. เพิ่มข้อมูลยาลงตาราง medicines
-      const { data: medData, error: medErr } = await supabase
-        .from('medicines')
-        .insert([{
-          user_id: user.id,
-          name: medForm.name.trim(),
-          total_pills: medForm.total_pills,
-          remaining_pills: medForm.total_pills,
-          expire_date: medForm.expire_date || null
-        }])
-        .select()
-        .single();
-
-      if (medErr) throw medErr;
-
-      // คำนวณ days_of_week
-      let daysArr = ['daily'];
-      if (medForm.freq_type === 'custom') {
-        daysArr = medForm.selected_days;
-      } else if (medForm.freq_type === 'interval') {
-        daysArr = [`every_${medForm.interval_days}_days`];
-      }
-
-      // 2. สร้างตารางเวลาสำหรับยานี้
-      const schedulePayloads = medForm.dose_times.map(item => ({
-        user_id: user.id,
-        medicine_id: medData.id,
-        time: `${item.time}:00`,
-        days_of_week: daysArr,
-        dose_amount: item.dose_amount,
-        active: true
-      }));
-
-      const { error: schedErr } = await supabase.from('schedules').insert(schedulePayloads);
-      if (schedErr) throw schedErr;
-
-      alert('ลงทะเบียนยาและตั้งเวลาเตือนเรียบร้อยแล้ว!');
-      // Reset Form
-      setMedForm({
-        name: '',
-        total_pills: 30,
-        expire_date: '',
-        freq_type: 'daily',
-        interval_days: 2,
-        selected_days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
-        is_critical: false,
-        dose_times: [{ time: '08:00', dose_amount: 1 }],
-      });
-
-      await fetchAllData(user.id);
-      setActiveTab('schedules');
-    } catch (err: any) {
-      alert('เกิดข้อผิดพลาด: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // ฟังก์ชันเพิ่ม/แก้ไขเวลาโดยให้เรียงลำดับตามเวลาเสมอ
   const addDoseTimeSlot = (defaultTime = '12:00') => {
-    setMedForm({
-      ...medForm,
-      dose_times: [...medForm.dose_times, { time: defaultTime, dose_amount: 1 }]
-    });
+    const updated = [...medForm.dose_times, { time: defaultTime, dose_amount: 1 }];
+    // Sort เรียงตามเวลา
+    updated.sort((a, b) => a.time.localeCompare(b.time));
+    setMedForm({ ...medForm, dose_times: updated });
   };
 
   const removeDoseTimeSlot = (index: number) => {
@@ -302,9 +296,115 @@ export default function Home() {
   const updateDoseSlot = (index: number, field: string, value: any) => {
     const updated = [...medForm.dose_times];
     updated[index] = { ...updated[index], [field]: value };
+    // ถ้าแก้ไขเวลา ให้ Auto Sort เรียงตามเวลาทันที
+    if (field === 'time') {
+      updated.sort((a, b) => a.time.localeCompare(b.time));
+    }
     setMedForm({ ...medForm, dose_times: updated });
   };
 
+  // สลับการเลือกวันในสัปดาห์ (พร้อมป้องกันการเลือกครบ 7 วัน)
+  const toggleDaySelection = (day: string) => {
+    let currentDays = [...medForm.selected_days];
+    if (currentDays.includes(day)) {
+      if (currentDays.length <= 1) return alert('ต้องเลือกอย่างน้อย 1 วัน');
+      currentDays = currentDays.filter((d) => d !== day);
+    } else {
+      currentDays.push(day);
+    }
+
+    // ป้องกันถ้าเลือกครบ 7 วัน ให้สลับไปใช้ประเภท daily แทน
+    if (currentDays.length === 7) {
+      alert('เลือกครบ 7 วัน ระบบจะปรับเป็นรูปแบบ "ทุกวัน" ให้อัตโนมัติครับ');
+      setMedForm({ ...medForm, freq_type: 'daily', selected_days: currentDays });
+    } else {
+      setMedForm({ ...medForm, selected_days: currentDays });
+    }
+  };
+
+  // Submit บันทึกยา + ตารางเวลา
+  const handleAddMedicineFull = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+    if (!medForm.name.trim()) return alert('กรุณาระบุชื่อยา');
+
+    // Validation เพิ่มเติม
+    if (medForm.freq_type === 'custom' && medForm.selected_days.length === 0) {
+      return alert('กรุณาเลือกวันในสัปดาห์อย่างน้อย 1 วัน');
+    }
+
+    setLoading(true);
+    try {
+      // 1. เพิ่มข้อมูลยาลงตาราง medicines
+      const { data: medData, error: medErr } = await supabase
+        .from('medicines')
+        .insert([
+          {
+            user_id: user.id,
+            name: medForm.name.trim(),
+            total_pills: medForm.total_pills,
+            remaining_pills: medForm.total_pills,
+            expire_date: medForm.expire_date || null,
+            is_critical: medForm.is_critical,
+          },
+        ])
+        .select()
+        .single();
+
+      if (medErr) throw medErr;
+
+      // 2. จัดเตรียม Payload ตารางเวลาตาม Database Schema ใหม่
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      let scheduleType = 'daily';
+      let daysOfWeek: string[] | null = null;
+      let intervalDays: number | null = null;
+
+      if (medForm.freq_type === 'custom') {
+        scheduleType = 'weekly';
+        daysOfWeek = medForm.selected_days;
+      } else if (medForm.freq_type === 'interval') {
+        scheduleType = 'interval';
+        intervalDays = medForm.interval_days;
+      }
+
+      const schedulePayloads = medForm.dose_times.map((item) => ({
+        user_id: user.id,
+        medicine_id: medData.id,
+        time: `${item.time}:00`,
+        schedule_type: scheduleType,
+        days_of_week: daysOfWeek,
+        interval_days: intervalDays,
+        start_date: todayStr,
+        dose_amount: item.dose_amount,
+        active: true,
+      }));
+
+      const { error: schedErr } = await supabase.from('schedules').insert(schedulePayloads);
+      if (schedErr) throw schedErr;
+
+      alert('ลงทะเบียนยาและตั้งเวลาเตือนเรียบร้อยแล้ว!');
+
+      // Reset Form
+      setMedForm({
+        name: '',
+        total_pills: 30,
+        expire_date: '',
+        freq_type: 'daily',
+        interval_days: 2,
+        selected_days: ['mon', 'wed', 'fri'],
+        is_critical: false,
+        dose_times: [{ time: '08:00', dose_amount: 1 }],
+      });
+
+      await fetchAllData(user.id);
+      setActiveTab('schedules'); // สลับไปแท็บตารางเตือนเผื่ออยากดู/แก้ไข
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
   const deleteMedicine = async (id: string) => {
     if (!confirm('ยืนยันลบรายการยานี้? ตารางเวลาจะถูกลบไปด้วย')) return;
     setLoading(true);
@@ -596,207 +696,242 @@ export default function Home() {
             <div className="space-y-6">
               {/* ฟอร์มลงทะเบียนยาแบบละเอียด */}
               <div className="bg-white p-6 rounded-2xl shadow-sm border-2 border-emerald-300 space-y-5">
-                <div className="border-b border-emerald-100 pb-3 flex items-center justify-between">
-                  <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
+              <div className="border-b border-emerald-100 pb-3 flex items-center justify-between">
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
                     <span>➕</span> ลงทะเบียนยาใหม่แบบละเอียด (Full Form)
-                  </h3>
-                  <span className="text-xs bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full font-bold">
-                    ตั้งมื้ออาหารได้ทันที
-                  </span>
-                </div>
+                </h3>
+              <span className="text-xs bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full font-bold">
+               ตั้งมื้ออาหารได้ทันที
+              </span>
+            </div>
 
-                <form onSubmit={handleAddMedicineFull} className="space-y-5">
-                  {/* ชื่อยา / จำนวน / วันหมดอายุ */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <form onSubmit={handleAddMedicineFull} className="space-y-5">
+                {/* ชื่อยา / จำนวน / วันหมดอายุ */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">
-                        ชื่อยา <span className="text-rose-500">*</span>
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={medForm.name}
-                        onChange={(e) => setMedForm({ ...medForm, name: e.target.value })}
-                        placeholder="เช่น ยาลดความดัน"
-                        className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                            ชื่อยา <span className="text-rose-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={medForm.name}
+                          onChange={(e) => setMedForm({ ...medForm, name: e.target.value })}
+                          placeholder="เช่น ยาลดความดัน"
+                      className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
                       />
                     </div>
                     <div>
                       <label className="block text-xs font-bold text-slate-700 mb-1">จำนวนเม็ดบรรจุรวม</label>
-                      <input
-                        type="number"
-                        min="1"
-                        value={medForm.total_pills}
-                        onChange={(e) => setMedForm({ ...medForm, total_pills: Number(e.target.value) })}
-                        className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">วันหมดอายุ (ถ้ามี)</label>
-                      <input
-                        type="date"
-                        value={medForm.expire_date}
-                        onChange={(e) => setMedForm({ ...medForm, expire_date: e.target.value })}
-                        className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  {/* รูปแบบการทาน (Frequency) */}
-                  <div className="space-y-2 bg-emerald-50/60 p-4 rounded-xl border border-emerald-200">
-                    <label className="block text-xs font-bold text-emerald-900">รูปแบบวันในการทาน (Frequency)</label>
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        { id: 'daily', label: 'ทุกวัน' },
-                        { id: 'interval', label: 'วันเว้นวัน (หรือทุกๆ N วัน)' },
-                        { id: 'custom', label: 'เลือกวันในสัปดาห์' },
-                      ].map((mode) => (
-                        <button
-                          key={mode.id}
-                          type="button"
-                          onClick={() => setMedForm({ ...medForm, freq_type: mode.id })}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition ${
-                            medForm.freq_type === mode.id
-                              ? 'bg-emerald-700 text-white border-emerald-700 shadow'
-                              : 'bg-white text-slate-700 border-emerald-200 hover:bg-emerald-100'
-                          }`}
-                        >
-                          {mode.label}
-                        </button>
-                      ))}
-                    </div>
-
-                    {medForm.freq_type === 'interval' && (
-                      <div className="flex items-center gap-2 mt-2">
-                        <span className="text-xs font-bold text-slate-700">กินยาทุกๆ</span>
                         <input
                           type="number"
-                          min="2"
-                          max="30"
-                          value={medForm.interval_days}
-                          onChange={(e) => setMedForm({ ...medForm, interval_days: Number(e.target.value) })}
-                          className="w-20 border-2 border-emerald-300 rounded-lg p-1 text-center font-bold text-sm"
+                          min="1"
+                          value={medForm.total_pills}
+                          onChange={(e) => setMedForm({ ...medForm, total_pills: Number(e.target.value) })}
+                          className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
                         />
-                        <span className="text-xs font-bold text-slate-700">วัน</span>
-                      </div>
-                    )}
+                    </div>
+                    <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">วันหมดอายุ (ถ้ามี)</label>
+                          <input
+                            type="date"
+                            value={medForm.expire_date}
+                            onChange={(e) => setMedForm({ ...medForm, expire_date: e.target.value })}
+                            className="w-full border-2 border-emerald-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-emerald-600 focus:outline-none"
+                        />
+                    </div>
                   </div>
 
-                  {/* เวลาและจำนวนเม็ดที่ต้องทาน (Multi-Dose Slot) */}
-                  <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                    <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-800">เวลาและจำนวนเม็ดที่ต้องทาน</label>
-                      {/* ปุ่มมื้อมาตรฐาน */}
-                      <div className="flex gap-1">
-                        <button type="button" onClick={() => addDoseTimeSlot('08:00')} className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-1 rounded-md">เช้า (08:00)</button>
-                        <button type="button" onClick={() => addDoseTimeSlot('12:00')} className="text-[10px] bg-orange-100 text-orange-800 font-bold px-2 py-1 rounded-md">กลางวัน (12:00)</button>
-                        <button type="button" onClick={() => addDoseTimeSlot('18:00')} className="text-[10px] bg-blue-100 text-blue-800 font-bold px-2 py-1 rounded-md">เย็น (18:00)</button>
-                        <button type="button" onClick={() => addDoseTimeSlot('21:00')} className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-1 rounded-md">ก่อนนอน (21:00)</button>
-                      </div>
-                    </div>
+        {/* รูปแบบการทาน (Frequency) */}
+        <div className="space-y-3 bg-emerald-50/60 p-4 rounded-xl border border-emerald-200">
+          <label className="block text-xs font-bold text-emerald-900">รูปแบบวันในการทาน (Frequency)</label>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { id: 'daily', label: 'ทุกวัน' },
+              { id: 'interval', label: 'วันเว้นวัน (หรือทุกๆ N วัน)' },
+              { id: 'custom', label: 'เลือกวันในสัปดาห์' },
+            ].map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                onClick={() => setMedForm({ ...medForm, freq_type: mode.id })}
+                className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition ${
+                  medForm.freq_type === mode.id
+                    ? 'bg-emerald-700 text-white border-emerald-700 shadow'
+                    : 'bg-white text-slate-700 border-emerald-200 hover:bg-emerald-100'
+                }`}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
 
-                    {medForm.dose_times.map((slot, idx) => (
-                      <div key={idx} className="flex items-center gap-3 bg-white p-3 rounded-xl border border-emerald-200">
-                        <span className="text-xs font-bold text-slate-500">มื้อที่ {idx + 1}:</span>
-                        <input
-                          type="time"
-                          required
-                          value={slot.time}
-                          onChange={(e) => updateDoseSlot(idx, 'time', e.target.value)}
-                          className="border-2 border-emerald-300 rounded-lg p-1.5 text-sm font-bold"
-                        />
-                        <div className="flex items-center gap-1.5 ml-auto">
-                          <span className="text-xs font-bold text-slate-600">จำนวน:</span>
-                          <button
-                            type="button"
-                            onClick={() => updateDoseSlot(idx, 'dose_amount', Math.max(1, slot.dose_amount - 1))}
-                            className="w-8 h-8 bg-rose-100 text-rose-700 font-extrabold rounded-lg text-lg flex items-center justify-center hover:bg-rose-200"
-                          >
-                            -
-                          </button>
-                          <span className="w-8 text-center font-extrabold text-base">{slot.dose_amount}</span>
-                          <button
-                            type="button"
-                            onClick={() => updateDoseSlot(idx, 'dose_amount', slot.dose_amount + 1)}
-                            className="w-8 h-8 bg-emerald-100 text-emerald-700 font-extrabold rounded-lg text-lg flex items-center justify-center hover:bg-emerald-200"
-                          >
-                            +
-                          </button>
-                          <span className="text-xs font-bold text-slate-600">เม็ด</span>
-                        </div>
-                        {medForm.dose_times.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => removeDoseTimeSlot(idx)}
-                            className="text-xs text-rose-500 font-bold p-1 hover:underline ml-2"
-                          >
-                            ลบมื้อนี้
-                          </button>
-                        )}
-                      </div>
-                    ))}
+          {/* เลือกวันเว้นวัน / ทุกๆ N วัน */}
+          {medForm.freq_type === 'interval' && (
+            <div className="flex items-center gap-2 mt-2 bg-white p-2.5 rounded-lg border border-emerald-200 w-fit">
+              <span className="text-xs font-bold text-slate-700">กินยาทุกๆ</span>
+              <input
+                type="number"
+                min="2"
+                max="30"
+                value={medForm.interval_days}
+                onChange={(e) => setMedForm({ ...medForm, interval_days: Number(e.target.value) })}
+                className="w-16 border-2 border-emerald-400 rounded-lg p-1 text-center font-extrabold text-sm"
+              />
+              <span className="text-xs font-bold text-slate-700">วัน</span>
+            </div>
+          )}
 
+          {/* ปุ่มเลือกวันในสัปดาห์ (แสดงเมื่อเลือก custom) */}
+          {medForm.freq_type === 'custom' && (
+            <div className="space-y-1.5 mt-2 bg-white p-3 rounded-xl border border-emerald-200">
+              <p className="text-[11px] font-bold text-slate-500">เลือกวันที่ต้องกินยา (ถ้าเลือกครบ 7 วันจะสลับเป็นแบบทุกวันให้อัตโนมัติ):</p>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { id: 'mon', label: 'จันทร์' },
+                  { id: 'tue', label: 'อังคาร' },
+                  { id: 'wed', label: 'พุธ' },
+                  { id: 'thu', label: 'พฤหัส' },
+                  { id: 'fri', label: 'ศุกร์' },
+                  { id: 'sat', label: 'เสาร์' },
+                  { id: 'sun', label: 'อาทิตย์' },
+                ].map((d) => {
+                  const isSelected = medForm.selected_days.includes(d.id);
+                  return (
                     <button
+                      key={d.id}
                       type="button"
-                      onClick={() => addDoseTimeSlot('12:00')}
-                      className="w-full py-2 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-xl border border-dashed border-emerald-400 hover:bg-emerald-200"
+                      onClick={() => toggleDaySelection(d.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                        isSelected
+                          ? 'bg-emerald-600 text-white border-emerald-600'
+                          : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'
+                      }`}
                     >
-                      [ + เพิ่มเวลากินยาสำหรับยานี้ ]
+                      {d.label} {isSelected && '✓'}
                     </button>
-                  </div>
-
-                  {/* ระดับความสำคัญ */}
-                  <div className="flex items-center gap-2 bg-amber-50 p-3 rounded-xl border border-amber-200">
-                    <input
-                      type="checkbox"
-                      id="critical"
-                      checked={medForm.is_critical}
-                      onChange={(e) => setMedForm({ ...medForm, is_critical: e.target.checked })}
-                      className="w-5 h-5 accent-amber-600 rounded"
-                    />
-                    <label htmlFor="critical" className="text-xs font-bold text-amber-900 cursor-pointer">
-                      ติดดาวเป็น &quot;ยาสำคัญมาก&quot; (หากลืมกินยาจะแจ้งเตือนผู้ดูแลผ่าน LINE ทันที)
-                    </label>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3.5 rounded-xl shadow-md text-base transition"
-                  >
-                    บันทึกข้อมูลยาลงตลับอัจฉริยะ
-                  </button>
-                </form>
-              </div>
-
-              {/* รายการคลังยาที่มีอยู่ */}
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-emerald-100 space-y-3">
-                <h3 className="font-bold text-slate-800 text-base flex items-center gap-2">
-                  <span>💊</span> รายการยาในคลังของคุณ ({medicines.length} ชนิด)
-                </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {medicines.map((med) => (
-                    <div key={med.id} className="p-4 rounded-xl border-2 border-emerald-100 bg-emerald-50/40 flex justify-between items-center">
-                      <div>
-                        <p className="font-bold text-slate-800 text-base">{med.name}</p>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          หมดอายุ: {med.expire_date || 'ไม่ระบุ'}
-                        </p>
-                        <p className="text-xs font-bold text-emerald-700 mt-1">
-                          คงเหลือ: {med.remaining_pills} / {med.total_pills} เม็ด
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => deleteMedicine(med.id)}
-                        className="bg-rose-100 text-rose-700 hover:bg-rose-200 text-xs font-bold px-3 py-1.5 rounded-lg transition"
-                      >
-                        🗑️ ลบ
-                      </button>
-                    </div>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
             </div>
           )}
+        </div>
+
+        {/* เวลาและจำนวนเม็ดที่ต้องทาน (Multi-Dose Slot) */}
+        <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+            <label className="text-xs font-bold text-slate-800">เวลาและจำนวนเม็ดที่ต้องทาน (เรียงตามเวลาอัตโนมัติ)</label>
+            <div className="flex flex-wrap gap-1">
+              <button type="button" onClick={() => addDoseTimeSlot('08:00')} className="text-[11px] bg-amber-100 text-amber-800 font-bold px-2.5 py-1 rounded-md hover:bg-amber-200">เช้า (08:00)</button>
+              <button type="button" onClick={() => addDoseTimeSlot('12:00')} className="text-[11px] bg-orange-100 text-orange-800 font-bold px-2.5 py-1 rounded-md hover:bg-orange-200">กลางวัน (12:00)</button>
+              <button type="button" onClick={() => addDoseTimeSlot('18:00')} className="text-[11px] bg-blue-100 text-blue-800 font-bold px-2.5 py-1 rounded-md hover:bg-blue-200">เย็น (18:00)</button>
+              <button type="button" onClick={() => addDoseTimeSlot('21:00')} className="text-[11px] bg-purple-100 text-purple-800 font-bold px-2.5 py-1 rounded-md hover:bg-purple-200">ก่อนนอน (21:00)</button>
+            </div>
+          </div>
+
+          {medForm.dose_times.map((slot, idx) => (
+            <div key={idx} className="flex items-center gap-3 bg-white p-3 rounded-xl border border-emerald-200 shadow-sm">
+              <span className="text-xs font-bold text-emerald-800 bg-emerald-100 px-2 py-1 rounded-md">มื้อที่ {idx + 1}</span>
+              <input
+                type="time"
+                required
+                value={slot.time}
+                onChange={(e) => updateDoseSlot(idx, 'time', e.target.value)}
+                className="border-2 border-emerald-300 rounded-lg p-1.5 text-sm font-bold focus:outline-none focus:border-emerald-600"
+              />
+              <div className="flex items-center gap-1.5 ml-auto">
+                <span className="text-xs font-bold text-slate-600">จำนวน:</span>
+                <button
+                  type="button"
+                  onClick={() => updateDoseSlot(idx, 'dose_amount', Math.max(1, slot.dose_amount - 1))}
+                  className="w-8 h-8 bg-rose-100 text-rose-700 font-extrabold rounded-lg text-lg flex items-center justify-center hover:bg-rose-200"
+                >
+                  -
+                </button>
+                <span className="w-8 text-center font-extrabold text-base">{slot.dose_amount}</span>
+                <button
+                  type="button"
+                  onClick={() => updateDoseSlot(idx, 'dose_amount', slot.dose_amount + 1)}
+                  className="w-8 h-8 bg-emerald-100 text-emerald-700 font-extrabold rounded-lg text-lg flex items-center justify-center hover:bg-emerald-200"
+                >
+                  +
+                </button>
+                <span className="text-xs font-bold text-slate-600">เม็ด</span>
+              </div>
+              {medForm.dose_times.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => removeDoseTimeSlot(idx)}
+                  className="text-xs text-rose-600 font-bold px-2 py-1 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 transition"
+                >
+                  ลบมื้อนี้
+                </button>
+              )}
+            </div>
+          ))}
+
+          <button
+            type="button"
+            onClick={() => addDoseTimeSlot('12:00')}
+            className="w-full py-2.5 bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl border border-dashed border-emerald-400 hover:bg-emerald-100 transition"
+          >
+            + เพิ่มเวลากินยาสำหรับยานี้
+          </button>
+        </div>
+
+        {/* ระดับความสำคัญ */}
+        <div className="flex items-center gap-2.5 bg-amber-50 p-3.5 rounded-xl border border-amber-200">
+          <input
+            type="checkbox"
+            id="critical"
+            checked={medForm.is_critical}
+            onChange={(e) => setMedForm({ ...medForm, is_critical: e.target.checked })}
+            className="w-5 h-5 accent-amber-600 rounded cursor-pointer"
+          />
+          <label htmlFor="critical" className="text-xs font-bold text-amber-900 cursor-pointer">
+            ติดดาวเป็น &quot;ยาสำคัญมาก&quot; (หากลืมกินยาจะแจ้งเตือนผู้ดูแลผ่าน LINE ทันที)
+          </label>
+        </div>
+
+        <button
+          type="submit"
+          className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3.5 rounded-xl shadow-md text-base transition"
+        >
+          บันทึกข้อมูลยาลงตลับอัจฉริยะ
+        </button>
+      </form>
+    </div>
+
+    {/* รายการคลังยาที่มีอยู่ */}
+    <div className="bg-white p-5 rounded-2xl shadow-sm border border-emerald-100 space-y-3">
+      <h3 className="font-bold text-slate-800 text-base flex items-center gap-2">
+        <span>💊</span> รายการยาในคลังของคุณ ({medicines.length} ชนิด)
+      </h3>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {medicines.map((med) => (
+          <div key={med.id} className="p-4 rounded-xl border-2 border-emerald-100 bg-emerald-50/40 flex justify-between items-center gap-3">
+            <div>
+              <p className="font-bold text-slate-800 text-base">{med.name}</p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                หมดอายุ: {med.expire_date || 'ไม่ระบุ'}
+              </p>
+              <p className="text-xs font-bold text-emerald-700 mt-1">
+                คงเหลือ: {med.remaining_pills} / {med.total_pills} เม็ด
+              </p>
+            </div>
+            {/* ปุ่มลบยา ปรับให้ใหญ่และกดง่ายขึ้น */}
+            <button
+              onClick={() => deleteMedicine(med.id)}
+              className="bg-rose-100 hover:bg-rose-200 text-rose-700 text-xs font-bold px-3.5 py-2 rounded-xl transition border border-rose-200 shadow-sm flex-shrink-0 flex items-center gap-1"
+            >
+              <span>🗑️</span> ลบยา
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+)}
 
           {/* TAB 4: SCHEDULE MANAGEMENT */}
           {activeTab === 'schedules' && (
