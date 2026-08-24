@@ -15,15 +15,17 @@ export default function Home() {
 
   const checkUserAndRedirect = async () => {
     try {
-      const loggedIn = await ensureLineSession();
-      if (!loggedIn) return;
+      // ตั้งเวลาเพื่อความรวดเร็ว หาก LIFF ไม่ตอบสนองภายใน 3 วินาที ให้ข้ามไปเรียก API เลย
+      const sessionPromise = ensureLineSession();
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(false), 3000));
+
+      await Promise.race([sessionPromise, timeoutPromise]);
 
       // ดึงข้อมูลผู้ใช้เพื่อเช็กว่าผูกกล่องยาไว้หรือยัง
       const res = await fetch('/api/me');
       if (res.ok) {
         const data = await res.json();
         
-        // ถ้าไม่มีข้อมูลกล่องยา ให้ไปหน้า Onboarding ก่อน
         if (!data.box || !data.box.box_id) {
           router.replace('/onboarding');
         } else {
