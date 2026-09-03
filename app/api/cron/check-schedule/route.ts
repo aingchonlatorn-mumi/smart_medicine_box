@@ -1,62 +1,108 @@
 import { NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
-import { sendLinePushMessage } from '@/lib/line';
+import { cronAuthorized, jsonError } from '@/lib/api';
+import { supabaseAdmin } from '@/lib/supabase-server';
+import { doseTime, occursOn } from '@/lib/schedule';
+import { bangkokParts, hhmm, minutesOfDay } from '@/lib/time';
+import { flexDoseAlert } from '@/lib/flex';
+import { sendLineFlex } from '@/lib/line';
+import type { Box, Medicine, Schedule, User } from '@/lib/types';
 
-export async function GET() {
+export const dynamic = 'force-dynamic';
+
+/**
+ * ยิงทุก 1 นาที — หามื้อที่ถึงเวลาแล้ว สร้าง log (pending) และส่ง Flex แจ้งเตือน
+ * เผื่อ cron มาช้า จึงรับมื้อที่เพิ่งเลยมาไม่เกิน GRACE_MINUTES ด้วย
+ * กันส่งซ้ำด้วย unique index (schedule_id, scheduled_time) ในตาราง logs
+ */
+const GRACE_MINUTES = 4;
+
+export async function GET(req: Request) {
+  if (!cronAuthorized(req)) return jsonError('unauthorized', 401);
+
   try {
-    // 1. ดึงเวลาปัจจุบันของไทย (UTC+7)
+    const db = supabaseAdmin();
     const now = new Date();
-    const thTime = new Date(now.getTime() + (7 * 60 * 60 * 1000));
-    const currentTime = thTime.toISOString().substring(11, 16); // รูปแบบ "18:45"
+    const clock = bangkokParts(now);
 
-    // 2. ดึง Schedules ที่ active อยู่
-    const { data: matchedSchedules, error: fetchError } = await supabase
-      .from('schedules')
-      .select('*, users!inner(*), medicines!inner(*)')
-      .eq('active', true);
+    const [{ data: schedules }, { data: boxes }, { data: users }, { data: medicines }] =
+      await Promise.all([
+        db.from('schedules').select('*').eq('active', true),
+        db.from('boxes').select('*'),
+        db.from('users').select('*'),
+        db.from('medicines').select('*'),
+      ]);
 
-    if (fetchError || !matchedSchedules) {
-      return NextResponse.json({ error: fetchError?.message || 'No schedules' }, { status: 500 });
-    }
+    const boxById = new Map((boxes as Box[] || []).map((b) => [b.box_id, b]));
+    const userById = new Map((users as User[] || []).map((u) => [u.user_id, u]));
+    const medById = new Map((medicines as Medicine[] || []).map((m) => [m.medicine_id, m]));
 
-    const results = [];
+    const triggered: unknown[] = [];
 
-    for (const sch of matchedSchedules) {
-      // ตัดวินาทีออกจาก time ใน DB เช่น "18:45:00" -> "18:45"
-      const schTime = sch.time.substring(0, 5);
+    for (const schedule of (schedules as Schedule[]) || []) {
+      if (!occursOn(schedule, clock.date)) continue;
 
-      // 3. เทียบเวลา: ส่งเฉพาะรายการที่เวลาตรงกับปัจจุบันเท่านั้น
-      if (schTime === currentTime) {
-        const userObj = Array.isArray(sch.users) ? sch.users[0] : sch.users;
-        const medObj = Array.isArray(sch.medicines) ? sch.medicines[0] : sch.medicines;
+      const dueAt = minutesOfDay(schedule.time);
+      const elapsed = clock.minutes - dueAt;
+      if (elapsed < 0 || elapsed > GRACE_MINUTES) continue;
 
-        const targetLineId = userObj?.line_user_id;
-        const medName = medObj?.name || 'ยาประจำตัว';
+      const box = boxById.get(schedule.box_id);
+      const user = box?.owner_user_id ? userById.get(box.owner_user_id) : null;
+      if (!user) continue;
 
-        if (!targetLineId) continue;
+      const medicine = medById.get(schedule.medicine_id);
+      const scheduledAt = doseTime(schedule, clock.date).toISOString();
 
-        // บันทึก Log
-        await supabase.from('logs').insert([
-          {
-            user_id: sch.user_id,
-            schedule_id: sch.id,
-            medicine_id: sch.medicine_id,
-            scheduled_time: new Date().toISOString(),
-            status: 'pending',
-          },
-        ]);
+      const { data: inserted, error } = await db
+        .from('logs')
+        .insert({
+          user_id: user.user_id,
+          box_id: box!.box_id,
+          schedule_id: schedule.schedule_id,
+          medicine_id: schedule.medicine_id,
+          scheduled_time: scheduledAt,
+          status: 'pending',
+        })
+        .select('log_id')
+        .maybeSingle();
 
-        // ส่ง LINE เตือน
-        const msg = `⏰ ถึงเวลากินยา [${medName}] จำนวน ${sch.dose_amount} เม็ดแล้วครับ!`;
-        await sendLinePushMessage(targetLineId, msg);
-
-        results.push({ schedule_id: sch.id, status: 'sent', time: currentTime });
+      if (error) {
+        // 23505 = ส่งไปแล้วในนาทีก่อนหน้า ถือว่าปกติ
+        if (error.code !== '23505') {
+          triggered.push({ schedule_id: schedule.schedule_id, error: error.message });
+        }
+        continue;
       }
+
+      const push = await sendLineFlex(
+        user.line_user_id,
+        `ถึงเวลาทานยา ${hhmm(schedule.time)} น.`,
+        flexDoseAlert({
+          time: hhmm(schedule.time),
+          medicineName: medicine?.name || 'ยาประจำตัว',
+          doseAmount: schedule.dose_amount || 1,
+          pillsLeft: medicine?.total_pills ?? 0,
+          mealRelation: schedule.meal_relation || 'none',
+        }),
+      );
+
+      triggered.push({
+        schedule_id: schedule.schedule_id,
+        log_id: inserted?.log_id,
+        time: hhmm(schedule.time),
+        line: push,
+      });
     }
 
-    return NextResponse.json({ success: true, currentTimeTH: currentTime, triggered: results });
-
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({
+      ok: true,
+      now: `${clock.date} ${clock.time}`,
+      checked: schedules?.length ?? 0,
+      triggered,
+    });
+  } catch (err) {
+    return jsonError(err instanceof Error ? err.message : 'cron ล้มเหลว', 500);
   }
 }
+
+/** Vercel Cron ยิงเป็น GET — เผื่อ cron ภายนอกที่ใช้ POST */
+export const POST = GET;

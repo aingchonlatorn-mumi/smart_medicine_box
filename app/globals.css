@@ -22,3 +22,20 @@ body {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+/* แอนิเมชันของหน้า onboarding success (ตามไฟล์ดีไซน์) */
+@keyframes popin {
+  0% { transform: scale(.4); opacity: 0; }
+  60% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes bargrow {
+  0% { width: 0; }
+  100% { width: 100%; }
+}
+
+/* ให้หน้า Reports พิมพ์ออกมาเป็น PDF ได้สะอาด */
+@media print {
+  header, nav, button { display: none !important; }
+  main { padding: 0 !important; max-width: 100% !important; }
+}
