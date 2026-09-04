@@ -1,7 +1,7 @@
 // lib/flex/index.ts — ตัวสร้าง LINE Flex Message ทั้ง 5 แบบตามไฟล์ดีไซน์ (2b)
 // พาเลตต์เดียวกับหน้าเว็บ: indigo #4f46e5 / เขียว #10b981 / เหลือง #f59e0b / แดง #fb7185
 
-import type { Medicine, Schedule } from '../types';
+import type { DoseState, MealRelation, Medicine, Schedule } from '../types';
 import { MEAL_LABEL, summarizeSchedules } from '../schedule';
 import { DOW_TH, hhmm, thaiDayMonth } from '../time';
 
@@ -35,6 +35,21 @@ function linkButton(label: string, path: string, style: 'primary' | 'secondary' 
     height: 'sm',
     color: style === 'primary' ? INDIGO : '#EEF2FF',
     action: { type: 'uri', label, uri },
+  };
+}
+
+/** ปุ่มที่ยิง postback กลับมาที่ webhook (ไม่ต้องพึ่ง https) */
+function postbackButton(
+  label: string,
+  data: string,
+  style: 'primary' | 'secondary' = 'primary',
+) {
+  return {
+    type: 'button',
+    style,
+    height: 'sm',
+    color: style === 'primary' ? INDIGO : '#EEF2FF',
+    action: { type: 'postback', label, data, displayText: label },
   };
 }
 
@@ -247,6 +262,206 @@ export function flexMissedAlert(params: {
           size: 'sm', color: MUTED,
         }),
         linkButton('ยืนยันว่าทานแล้ว', '/dashboard'),
+      ]),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 7 · ตารางมื้อยาวันนี้ (ปุ่ม "ตารางทานยา" ใน Rich Menu)                */
+/* ------------------------------------------------------------------ */
+export interface TodayDoseLine {
+  schedule_id: string | null;
+  time: string;
+  period: string;
+  dose_amount: number;
+  meal_relation: MealRelation;
+  state: DoseState;
+  actual_time: string | null;
+}
+
+const STATE_MARK: Record<DoseState, { label: string; color: string }> = {
+  taken:   { label: 'ทานแล้ว', color: GREEN },
+  late:    { label: 'ทานเลท',  color: AMBER },
+  missed:  { label: 'ลืมทาน',  color: ROSE },
+  pending: { label: 'รอทาน',   color: FAINT },
+};
+
+export function flexTodaySchedule(params: {
+  medicineName: string;
+  dateLabel: string;
+  doses: TodayDoseLine[];
+  /** มื้อที่ยังไม่ได้ทานและใกล้เวลาที่สุด ใช้ทำปุ่มยืนยันด่วน */
+  confirmable: TodayDoseLine | null;
+}) {
+  const { doses, confirmable } = params;
+  const done = doses.filter((d) => d.state === 'taken' || d.state === 'late').length;
+
+  return {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      paddingAll: '20px',
+      contents: compact([
+        {
+          type: 'box',
+          layout: 'horizontal',
+          contents: [
+            text('ตารางทานยาวันนี้', { weight: 'bold', size: 'lg', color: INK, flex: 3 }),
+            text(params.dateLabel, {
+              size: 'xs', color: FAINT, align: 'end', gravity: 'center', flex: 2,
+            }),
+          ],
+        },
+        text(`${params.medicineName} · ทานแล้ว ${done} จาก ${doses.length} มื้อ`, {
+          size: 'sm', color: MUTED,
+        }),
+        { type: 'separator', color: '#F1F5F9' },
+        ...doses.map((dose) => {
+          const mark = STATE_MARK[dose.state];
+          return {
+            type: 'box',
+            layout: 'horizontal',
+            spacing: 'sm',
+            contents: [
+              text(dose.period, { size: 'sm', color: MUTED, flex: 3 }),
+              text(`${dose.time} น.`, {
+                size: 'md', weight: 'bold', color: INK, flex: 4,
+              }),
+              text(
+                dose.actual_time ? `${mark.label} ${dose.actual_time}` : mark.label,
+                { size: 'sm', weight: 'bold', color: mark.color, align: 'end', flex: 5 },
+              ),
+            ],
+          };
+        }),
+        doses.length === 0
+          ? text('วันนี้ไม่มีมื้อยาตามตาราง', { size: 'sm', color: FAINT })
+          : null,
+        { type: 'separator', color: '#F1F5F9' },
+        confirmable
+          ? postbackButton(
+              `ทานตอนนี้ (มื้อ ${confirmable.time})`,
+              `action=confirm_dose&schedule_id=${confirmable.schedule_id ?? ''}`,
+            )
+          : null,
+        linkButton('แก้ไขตาราง', '/schedule', confirmable ? 'secondary' : 'primary'),
+      ]),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 8 · เลือกช่วงเวลารายงาน แล้วเปิด PDF (ปุ่ม "รายงาน" ใน Rich Menu)     */
+/* ------------------------------------------------------------------ */
+export function flexReportChoice(params: { pdfUrl: (days: number) => string; adherence: number }) {
+  const button = (days: number) => {
+    const uri = params.pdfUrl(days);
+    if (!uri.startsWith('https://')) return null;
+    return {
+      type: 'button',
+      style: days === 7 ? 'primary' : 'secondary',
+      height: 'sm',
+      color: days === 7 ? INDIGO : '#EEF2FF',
+      action: { type: 'uri', label: `รายงาน ${days} วัน`, uri },
+    };
+  };
+
+  return {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      paddingAll: '20px',
+      contents: compact([
+        text('รายงานการทานยา', { weight: 'bold', size: 'lg', color: INK }),
+        text(
+          `สัปดาห์นี้ทานตรงเวลา ${params.adherence}% — เลือกช่วงเวลาที่ต้องการ แล้วสั่งพิมพ์จากหน้าที่เปิดขึ้นมาเพื่อนำไปพบแพทย์`,
+          { size: 'sm', color: MUTED },
+        ),
+        { type: 'separator', color: '#F1F5F9' },
+        button(7),
+        button(30),
+      ]),
+    },
+  };
+}
+
+/** ข้อมูลยังน้อยเกินไปจนสรุปสถิติไม่ได้ */
+export function flexNotEnoughData(daysWithData: number) {
+  return {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      paddingAll: '20px',
+      contents: compact([
+        text('ยังสรุปรายงานไม่ได้', { weight: 'bold', size: 'lg', color: AMBER }),
+        text('ระบบต้องการข้อมูลการทานยาอย่างน้อย 3 วันเพื่อประมวลผลสถิติ', {
+          size: 'sm', color: INK,
+        }),
+        text(
+          `ตอนนี้มีข้อมูล ${daysWithData} วัน — ใช้งานต่ออีกสักระยะแล้วกลับมาดูใหม่ได้เลย`,
+          { size: 'xs', color: MUTED },
+        ),
+        linkButton('ดูประวัติที่มีอยู่', '/logs', 'secondary'),
+      ]),
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* 6 · วิธีใช้งาน (ปุ่มช่วยเหลือใน Rich Menu)                            */
+/* ------------------------------------------------------------------ */
+export function flexHelp() {
+  const steps: Array<[string, string]> = [
+    ['ตั้งตารางยา', 'กดปุ่ม "ตารางยา" ในเมนูด้านล่าง กรอกชื่อยาและจำนวนเม็ด แล้วตั้งเวลาแต่ละมื้อ'],
+    ['รอรับแจ้งเตือน', 'พอถึงเวลา ระบบจะส่งข้อความบอกชื่อยาและจำนวนเม็ดให้อัตโนมัติ'],
+    ['เปิดฝากล่อง', 'กล่องจะถ่ายภาพและบันทึกให้เอง ไม่ต้องกดอะไรเพิ่ม'],
+    ['ดูย้อนหลัง', 'กดปุ่ม "ประวัติ" ดูว่าทานครบไหม หรือ "รายงาน" เพื่อพิมพ์ให้แพทย์ดู'],
+  ];
+
+  return {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      paddingAll: '20px',
+      contents: compact([
+        text('วิธีใช้งาน Smart PillBox', { weight: 'bold', size: 'lg', color: INK }),
+        { type: 'separator', color: '#F1F5F9' },
+        ...steps.map(([title, detail], index) => ({
+          type: 'box',
+          layout: 'horizontal',
+          spacing: 'md',
+          contents: [
+            text(String(index + 1), {
+              flex: 0, size: 'sm', weight: 'bold', color: INDIGO, align: 'center',
+            }),
+            {
+              type: 'box',
+              layout: 'vertical',
+              flex: 1,
+              contents: [
+                text(title, { size: 'sm', weight: 'bold', color: INK }),
+                text(detail, { size: 'xs', color: MUTED }),
+              ],
+            },
+          ],
+        })),
+        text('พิมพ์ "ตารางยา" ในแชทนี้ เพื่อดูเวลาที่ตั้งไว้ได้ตลอด', {
+          size: 'xs', color: FAINT,
+        }),
+        linkButton('เปิดหน้าหลัก', '/dashboard'),
       ]),
     },
   };

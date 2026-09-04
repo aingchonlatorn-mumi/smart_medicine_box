@@ -294,3 +294,12 @@ export function summarize(slots: DoseSlot[]): AdherenceSummary {
     adherence: total ? Math.round(((onTime + late) / total) * 100) : 0,
   };
 }
+
+/** ป้ายช่วงเวลาของมื้อ ตามที่คนไทยเรียกกัน */
+export function periodLabel(time: string): string {
+  const minutes = minutesOfDay(time);
+  if (minutes < 11 * 60) return 'เช้า';
+  if (minutes < 16 * 60) return 'กลางวัน';
+  if (minutes < 21 * 60) return 'เย็น';
+  return 'ก่อนนอน';
+}
