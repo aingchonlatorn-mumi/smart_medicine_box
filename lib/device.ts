@@ -11,7 +11,13 @@ import type { Box } from './types';
 /** MAC เก็บรูปแบบเดียวเสมอ: ตัวพิมพ์ใหญ่ 12 ตัว ไม่มีเครื่องหมายคั่น */
 export function normalizeMac(raw: string | null | undefined): string | null {
   const mac = (raw || '').toUpperCase().replace(/[^0-9A-F]/g, '');
-  return /^[0-9A-F]{12}$/.test(mac) ? mac : null;
+  if (!/^[0-9A-F]{12}$/.test(mac)) return null;
+
+  // ปฏิเสธค่าที่ไม่ใช่ MAC จริง — 000000000000 คือค่าที่ได้เมื่ออ่าน MAC
+  // ก่อน WiFi stack เริ่มทำงาน ถ้าปล่อยผ่าน บอร์ดหลายตัวจะชนกันที่ค่าเดียวกัน
+  if (/^0{12}$/.test(mac) || /^F{12}$/.test(mac)) return null;
+
+  return mac;
 }
 
 /** MAC สำหรับแสดงผล A0:B7:65:2C:1F:E8 */

@@ -1,11 +1,9 @@
 /* =============================================================================
    Smart PillBox — AI-Thinker ESP32-CAM + reed switch MC-38
-   ต่อยอดจากสเก็ตช์เดิมที่ถ่ายภาพและเปิดดูผ่านหน้าเว็บได้แล้ว
-   เพิ่มเข้ามา: ผูกบอร์ดกับกล่องอัตโนมัติ + ถ่ายเป็นชุด + ส่งขึ้นเซิร์ฟเวอร์
+   เฟิร์มแวร์ 2.0.1
 
-   หน้าที่ของบอร์ด: รายงาน "สิ่งที่เห็น" เท่านั้น
-   ไม่ตัดสินว่าทานยาแล้วหรือยัง เพราะการตีความอยู่ฝั่งเซิร์ฟเวอร์ทั้งหมด
-   แก้กฎ (เช่น เปิดกี่วินาทีถึงนับ) ได้โดยไม่ต้อง flash บอร์ดใหม่
+   หน้าที่ของบอร์ด: รายงาน "สิ่งที่เห็น" เท่านั้น ไม่ตัดสินว่าทานยาแล้วหรือยัง
+   การตีความอยู่ฝั่งเซิร์ฟเวอร์ทั้งหมด แก้กฎได้โดยไม่ต้อง flash บอร์ดใหม่
 
    การต่อสาย
      reed switch ขาที่ 1 → GPIO13
@@ -15,9 +13,9 @@
 
    ⚠ ห้ามย้ายไป GPIO12 — เป็น strapping pin (MTDI) ที่ ESP32 อ่านตอนบูต
      ถ้าโดนดึง HIGH ตอนบูต (ซึ่งเกิดพอดีเวลาฝาเปิดค้างอยู่) บอร์ดจะบูตไม่ขึ้น
-     อาการจะสุ่มมาก คือบูตตอนฝาปิดรอด บูตตอนฝาเปิดเจ๊ง หาสาเหตุยาก
 
    ไฟเลี้ยง: จ่าย 5V เข้าขา 5V โดยตรง อย่างน้อย 1A
+   Arduino IDE: Board = AI Thinker ESP32-CAM, PSRAM = Enabled
    ============================================================================= */
 
 #include "esp_camera.h"
@@ -27,26 +25,32 @@
 #include <WebServer.h>
 #include <Preferences.h>
 
+// อ่าน MAC จาก eFuse โดยตรง (รองรับทั้ง arduino-esp32 v2 และ v3)
+#if __has_include("esp_mac.h")
+  #include "esp_mac.h"
+#else
+  #include "esp_system.h"
+#endif
+
 /* ------------------------------- ตั้งค่า ------------------------------- */
 const char* ssid     = "AA";
 const char* password = "aing0864017741";
 
 const char* API_BASE   = "https://smart-pillbox-rosy.vercel.app";
-const char* BOX_SERIAL = "B-001";      // ต้องตรงกับสติกเกอร์ข้างกล่องและแถวใน boxes
-const char* FIRMWARE   = "2.0.0";
+const char* BOX_SERIAL = "B-001";
+const char* FIRMWARE   = "2.0.1";
 
 #define REED_PIN       13
 #define FLASH_LED_PIN  4
 
-// แฟลชปิดไว้ตามที่ทดสอบแล้วว่าทำให้ไฟกระชากจนบอร์ดรีบูต
-// ถ้าเปลี่ยนไปใช้แหล่งจ่ายไฟที่แรงพอแล้วค่อยเปิดเป็น true
+// ปิดแฟลชไว้ ทดสอบแล้วว่าทำให้ไฟตกจนบอร์ดรีบูต
 #define USE_FLASH      false
 
-const unsigned long debounceDelay   = 50;      // กรองสัญญาณเด้งของ reed switch
-const unsigned long FRAME_GAP_MS    = 1200;    // เว้นระยะระหว่างเฟรมในชุด
-const uint8_t       MAX_FRAMES      = 3;       // ถ่ายกี่เฟรมต่อการเปิดฝา 1 ครั้ง
-const unsigned long MAX_OPEN_MS     = 120000;  // เปิดค้างเกิน 2 นาที = น่าจะลืมปิด
-const unsigned long HEARTBEAT_MS    = 900000;  // บอกเซิร์ฟเวอร์ว่ายังไม่ตาย ทุก 15 นาที
+const unsigned long debounceDelay   = 50;
+const unsigned long FRAME_GAP_MS    = 1200;
+const uint8_t       MAX_FRAMES      = 3;
+const unsigned long MAX_OPEN_MS     = 120000;
+const unsigned long HEARTBEAT_MS    = 900000;
 
 /* --------------------- Pin Mapping ของ AI-THINKER --------------------- */
 #define PWDN_GPIO_NUM     32
@@ -69,10 +73,9 @@ const unsigned long HEARTBEAT_MS    = 900000;  // บอกเซิร์ฟเ
 WebServer server(80);
 Preferences prefs;
 
-String deviceMac;      // A0B7652C1FE8 — ตัวระบุบอร์ด ไม่ใช่ความลับ
+String deviceMac;      // ตัวระบุบอร์ด ไม่ใช่ความลับ
 String deviceKey;      // ตัวยืนยันตัวตน เก็บใน NVS ไม่ฝังในโค้ด
 
-// ภาพชุดที่ถ่ายระหว่างฝาเปิด เก็บไว้ใน PSRAM
 uint8_t* frames[MAX_FRAMES];
 size_t   frameSizes[MAX_FRAMES];
 uint8_t  frameCount = 0;
@@ -80,6 +83,24 @@ uint8_t  frameCount = 0;
 int lastState = LOW;
 int stableState = LOW;
 unsigned long lastDebounceTime = 0;
+
+/**
+ * อ่าน MAC จาก eFuse ของชิปโดยตรง
+ *
+ * ห้ามใช้ WiFi.macAddress() ตอนต้น setup() เพราะจะได้ 00:00:00:00:00:00
+ * ถ้า WiFi stack ยังไม่เริ่มทำงาน — เจอปัญหานี้จริง บอร์ดผูกกล่องด้วย MAC
+ * ศูนย์ทั้งหมด ซึ่งถ้ามีบอร์ดตัวที่สองจะชนกันที่ค่าเดียวกันทันที
+ * ส่วน eFuse อ่านได้เสมอไม่ว่า WiFi จะพร้อมหรือยัง
+ */
+String readMacFromEfuse() {
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
 
 /* ------------------------------- กล้อง ------------------------------- */
 void setupCamera() {
@@ -118,10 +139,8 @@ void setupCamera() {
 
 /**
  * ถ่าย 1 เฟรม แล้วคัดลอกออกมาเก็บใน PSRAM
- *
  * ต้องคัดลอกเพราะ fb_count = 1 ถ้าถือ frame buffer ไว้จะถ่ายเฟรมถัดไปไม่ได้
- * และต้องใช้ ps_malloc ไม่ใช่ malloc เพราะ RAM ภายในเหลือไม่ถึง 200KB
- * หลังเปิด WiFi + กล้อง เก็บภาพ VGA หลายเฟรมไม่พอแน่นอน
+ * และต้องใช้ ps_malloc เพราะ Internal SRAM เหลือไม่พอเก็บภาพ VGA หลายเฟรม
  */
 void captureFrame() {
   if (frameCount >= MAX_FRAMES) return;
@@ -152,13 +171,16 @@ void captureFrame() {
 }
 
 void freeFrames() {
-  for (uint8_t i = 0; i < frameCount; i++) free(frames[i]);
+  for (uint8_t i = 0; i < frameCount; i++) {
+    if (frames[i]) {
+      free(frames[i]);
+      frames[i] = NULL;
+    }
+  }
   frameCount = 0;
 }
 
 /* ---------------------------- หน้าเว็บในเครื่อง ---------------------------- */
-// เปิดดูภาพล่าสุดจากมือถือที่อยู่วง WiFi เดียวกัน ใช้ตอนเล็งกล้องตอนประกอบกล่อง
-
 void handleJpg() {
   if (frameCount == 0) {
     server.send(200, "text/plain; charset=utf-8",
@@ -173,35 +195,35 @@ void handleJpg() {
 
 void handleStatus() {
   String html = "<meta charset='utf-8'><body style='font-family:sans-serif;padding:20px'>";
-  html += "<h2>Smart PillBox</h2>";
+  html += "<h2>Smart PillBox Status</h2>";
   html += "<p>กล่อง: <b>" + String(BOX_SERIAL) + "</b><br>";
   html += "MAC: <b>" + deviceMac + "</b><br>";
-  html += "ผูกกับกล่องแล้ว: <b>" + String(deviceKey.isEmpty() ? "ยัง" : "เรียบร้อย") + "</b><br>";
+  html += "ผูกกับกล่องแล้ว: <b>" + String(deviceKey.isEmpty() ? "ยังไม่ผูก" : "เรียบร้อย") + "</b><br>";
   html += "ฝาตอนนี้: <b>" + String(stableState == HIGH ? "เปิด" : "ปิด") + "</b><br>";
+  html += "PSRAM คงเหลือ: <b>" + String(ESP.getFreePsram() / 1024) + " KB</b><br>";
   html += "เฟิร์มแวร์: " + String(FIRMWARE) + "</p>";
   html += "<p><a href='/'>ดูภาพล่าสุด</a></p></body>";
   server.send(200, "text/html; charset=utf-8", html);
 }
 
 /* ------------------------------ เครือข่าย ------------------------------ */
-bool connectWifi(uint32_t timeoutMs = 20000) {
+bool connectWifi(uint32_t timeoutMs = 15000) {
   if (WiFi.status() == WL_CONNECTED) return true;
   WiFi.begin(ssid, password);
   uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) delay(300);
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs) {
+    delay(300);
+  }
   return WiFi.status() == WL_CONNECTED;
 }
 
-/**
- * ขอ device key ครั้งแรกแล้วเก็บลง NVS
- * ทำให้ไม่ต้องฝังคีย์ลับไว้ในโค้ด และแฟลชบอร์ดใหม่กี่ครั้งคีย์ก็ยังอยู่
- */
+/** ขอ device key ครั้งแรกแล้วเก็บลง NVS — ไม่ต้องฝังคีย์ลับไว้ในโค้ด */
 bool provision() {
   if (!connectWifi()) return false;
 
   WiFiClientSecure client;
-  client.setInsecure();   // ข้ามการตรวจใบรับรอง — พอสำหรับต้นแบบ
-                          // ถ้าจะใช้จริงควรฝัง root CA ของผู้ออกใบรับรองไว้
+  client.setInsecure();   // ข้ามการตรวจใบรับรอง พอสำหรับต้นแบบ
+
   HTTPClient http;
   http.begin(client, String(API_BASE) + "/api/hardware/provision");
   http.addHeader("Content-Type", "application/json");
@@ -239,14 +261,18 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
   if (deviceKey.isEmpty() && !provision()) return false;
 
   String boundary = "----pillbox" + String(millis());
-  String head;
+  String head = "";
 
   auto addField = [&](const char* name, const String& value) {
     head += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" +
             name + "\"\r\n\r\n" + value + "\r\n";
   };
 
+  addField("box_serial", BOX_SERIAL);
+  addField("device_mac", deviceMac);
   addField("event", eventType);
+  // ชื่อฟิลด์ต้องตรงกับที่เซิร์ฟเวอร์อ่าน ไม่งั้นระยะเวลาเปิดฝาจะเป็น null
+  // แล้วตัวกรอง "เปิดแวบเดียวไม่นับเป็นการหยิบยา" จะไม่ทำงาน
   addField("lid_open_seconds", String(openMs / 1000));
   addField("firmware", FIRMWARE);
 
@@ -262,7 +288,6 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
   size_t total = head.length() + tail.length();
   for (uint8_t i = 0; i < frameCount; i++) total += imageHeads[i].length() + frameSizes[i] + 2;
 
-  // ประกอบ body ใน PSRAM ด้วยเหตุผลเดียวกับตอนเก็บภาพ
   uint8_t* body = (uint8_t*)ps_malloc(total);
   if (!body) body = (uint8_t*)malloc(total);
   if (!body) {
@@ -285,9 +310,10 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
   HTTPClient http;
   http.begin(client, String(API_BASE) + "/api/hardware/upload");
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  http.addHeader("x-device-serial", BOX_SERIAL);
   http.addHeader("x-device-mac", deviceMac);
   http.addHeader("x-device-key", deviceKey);
-  http.setTimeout(20000);
+  http.setTimeout(25000);
 
   int code = http.POST(body, at);
   String res = http.getString();
@@ -296,7 +322,7 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
 
   Serial.printf("upload [%d] %s\n", code, res.c_str());
 
-  // คีย์ใช้ไม่ได้แล้ว (เช่นแอดมินล้าง device_mac ในฐานข้อมูล) → ขอผูกใหม่รอบหน้า
+  // คีย์ใช้ไม่ได้แล้ว (เช่นแอดมินล้าง device_mac) → ขอผูกใหม่รอบหน้า
   if (code == 401) {
     prefs.begin("pillbox", false);
     prefs.remove("key");
@@ -315,20 +341,34 @@ void setup() {
   pinMode(FLASH_LED_PIN, OUTPUT);
   digitalWrite(FLASH_LED_PIN, LOW);
 
+  if (psramFound()) {
+    Serial.printf("✅ พบ PSRAM: %d bytes\n", ESP.getFreePsram());
+  } else {
+    Serial.println("⚠️ ไม่พบ PSRAM ระบบจะสำรองไปใช้ Internal SRAM แทน");
+  }
+
   setupCamera();
 
   WiFi.mode(WIFI_STA);
-  deviceMac = WiFi.macAddress();   // A0:B7:65:2C:1F:E8
-  deviceMac.replace(":", "");      // ฝั่งเซิร์ฟเวอร์เก็บแบบไม่มีเครื่องหมายคั่น
-  deviceMac.toUpperCase();
+  deviceMac = readMacFromEfuse();
   Serial.println("MAC ของบอร์ดนี้: " + deviceMac);
 
   Serial.print("กำลังเชื่อมต่อ Wi-Fi");
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(ssid, password);
     delay(500);
     Serial.print(".");
+    attempts++;
+    if (attempts > 40) {   // รอเกิน 20 วินาทีแล้วยังไม่ติด ลองใหม่
+      Serial.println("\n[Wi-Fi] หมดเวลาเชื่อมต่อ กำลังเริ่มใหม่อีกครั้ง...");
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+      attempts = 0;
+    }
   }
+
   Serial.println("\n--- Wi-Fi เชื่อมต่อแล้ว ---");
   Serial.print(">> ดูภาพและสถานะได้ที่: http://");
   Serial.println(WiFi.localIP());
@@ -341,7 +381,9 @@ void setup() {
   deviceKey = prefs.getString("key", "");
   prefs.end();
 
-  if (deviceKey.isEmpty()) provision();
+  if (deviceKey.isEmpty()) {
+    provision();
+  }
   sendEvent("boot", 0);
 
   stableState = digitalRead(REED_PIN);
@@ -363,36 +405,34 @@ void loop() {
     stableState = reading;
 
     if (stableState == HIGH) {
-      // ฝาเปิด — เริ่มจับเวลาและถ่ายเป็นชุด
       Serial.println(">> [EVENT] ตรวจพบการเปิดฝา");
       openedAt = millis();
       lastFrameAt = 0;
       freeFrames();
     } else {
-      // ฝาปิด — สรุปแล้วส่งขึ้นเซิร์ฟเวอร์ทีเดียว
       unsigned long openMs = millis() - openedAt;
       Serial.printf(".. [INFO] ปิดฝาแล้ว เปิดค้าง %.1f วินาที ถ่ายได้ %d เฟรม\n",
                     openMs / 1000.0, frameCount);
       sendEvent("lid_close", openMs);
-      // ไม่ freeFrames() ทันที เพื่อให้เปิดหน้าเว็บดูภาพล่าสุดได้
+      // ไม่ล้างเฟรมทันที เพื่อให้เปิดหน้าเว็บดูภาพล่าสุดได้
     }
   }
   lastState = reading;
 
   // ถ่ายหลายเฟรมตลอดช่วงที่ฝาเปิด เพราะเฟรมเดียวมักไม่ทันจังหวะที่มือเข้ามา
   if (stableState == HIGH && frameCount < MAX_FRAMES &&
-      millis() - lastFrameAt > FRAME_GAP_MS) {
+      (millis() - lastFrameAt) > FRAME_GAP_MS) {
     lastFrameAt = millis();
     captureFrame();
   }
 
-  // เปิดค้างนานผิดปกติ แจ้งไว้ครั้งเดียวแล้วรีเซ็ตตัวจับเวลา
-  if (stableState == HIGH && millis() - openedAt > MAX_OPEN_MS) {
+  // เปิดค้างนานผิดปกติ แจ้งครั้งเดียวแล้วรีเซ็ตตัวจับเวลา
+  if (stableState == HIGH && (millis() - openedAt) > MAX_OPEN_MS) {
     sendEvent("error", millis() - openedAt);
     openedAt = millis();
   }
 
-  if (millis() - lastHeartbeat > HEARTBEAT_MS) {
+  if ((millis() - lastHeartbeat) > HEARTBEAT_MS) {
     lastHeartbeat = millis();
     sendEvent("heartbeat", 0);
   }

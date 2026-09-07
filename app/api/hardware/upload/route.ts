@@ -52,7 +52,9 @@ export async function POST(req: Request) {
 
     const eventType = (field('event') || 'lid_close') as
       'lid_open' | 'lid_close' | 'boot' | 'heartbeat' | 'error';
-    const openSeconds = field('lid_open_seconds') ? Number(field('lid_open_seconds')) : null;
+    // รับได้ทั้งสองชื่อ เผื่อเฟิร์มแวร์รุ่นที่ติดตั้งไปแล้วใช้ชื่อเดิม
+    const rawSeconds = field('lid_open_seconds') ?? field('open_duration');
+    const openSeconds = rawSeconds !== null && rawSeconds !== '' ? Number(rawSeconds) : null;
 
     await touchDevice(box.box_id, field('firmware'));
 
