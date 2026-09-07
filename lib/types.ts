@@ -19,8 +19,16 @@ export interface User {
 export interface Box {
   box_id: string;
   owner_user_id: string | null;
+  /** รหัสที่พิมพ์ติดข้างกล่อง ผู้ป่วยกรอกตอนลงทะเบียน เช่น B-001 */
   box_serial: string;
   status: string | null;
+  /** MAC ของบอร์ด ESP32 ที่อยู่ในกล่องใบนี้ (ตัวพิมพ์ใหญ่ 12 ตัว) */
+  device_mac: string | null;
+  /** sha256 ของ device key — ไม่เก็บคีย์จริง */
+  device_key_hash: string | null;
+  device_bound_at: string | null;
+  last_seen_at: string | null;
+  firmware_version: string | null;
   created_at?: string;
 }
 
@@ -58,8 +66,42 @@ export interface DoseLog {
   scheduled_time: string;
   actual_time: string | null;
   status: LogStatus;
+  /** ภาพตัวแทนที่เอาไปโชว์ใน LINE และหน้า Dashboard */
   image_url: string | null;
+  /* --- หลักฐานจากฮาร์ดแวร์ เก็บแยกจากผลสรุป (status) --- */
+  lid_opened_at: string | null;
+  lid_open_seconds: number | null;
+  /** null = ยังไม่ได้ประมวลผลภาพ */
+  hand_detected: boolean | null;
+  confirmed_by: ConfirmedBy | null;
   created_at?: string;
+}
+
+/** ใครเป็นคนยืนยันว่าทานยาแล้ว — ใช้วัดว่าฮาร์ดแวร์ทำงานได้ดีแค่ไหน */
+export type ConfirmedBy = 'device' | 'patient' | 'caregiver' | 'system';
+
+/** ภาพหนึ่งเฟรมในชุดที่ถ่ายตอนเปิดฝา */
+export interface LogImage {
+  image_id: string;
+  log_id: string;
+  box_id: string | null;
+  image_url: string;
+  storage_path: string | null;
+  sequence: number;
+  captured_at: string;
+  hand_detected: boolean | null;
+  detection: Record<string, unknown> | null;
+}
+
+/** เหตุการณ์ที่อุปกรณ์รายงานเข้ามา — ประวัติการเข้าถึงกล่องยา */
+export interface DeviceEvent {
+  event_id: string;
+  box_id: string;
+  event_type: 'lid_open' | 'lid_close' | 'boot' | 'heartbeat' | 'error';
+  occurred_at: string;
+  lid_open_seconds: number | null;
+  log_id: string | null;
+  detail: Record<string, unknown> | null;
 }
 
 /** log + ข้อมูลที่ join มาแล้ว ใช้ในหน้า UI */
