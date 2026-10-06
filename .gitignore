@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# โมเดลที่เทรนแล้ว ไฟล์ใหญ่ ไม่ต้องเก็บใน git
+final_model.pt
+*.pt
