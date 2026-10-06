@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
-import { Activity, Check, ChevronRight, Loader2 } from 'lucide-react';
+import { Activity, Camera, Check, ChevronRight, Loader2 } from 'lucide-react';
 import { apiFetch } from '@/lib/session';
 import { bangkokToday, daysBetween, humanMinutes, timeOf } from '@/lib/time';
 import { MEAL_LABEL } from '@/lib/schedule';
@@ -100,6 +100,14 @@ export default function DashboardPage() {
               <div className="text-[16px] text-indigo-200">
                 เหลือในกล่อง {medicine.total_pills} เม็ด
               </div>
+              {/* บอกที่มาของตัวเลข เพื่อให้ผู้ใช้รู้ว่าเป็นค่าที่กล้องนับหรือค่าที่กรอกเอง */}
+              {medicine.count_source === 'camera' && (
+                <div className="mt-0.5 inline-flex items-center gap-1 text-[13px] text-indigo-200/90">
+                  <Camera size={13} />
+                  นับโดยกล้อง
+                  {medicine.last_counted_at && ` · ${timeOf(medicine.last_counted_at)} น.`}
+                </div>
+              )}
             </div>
           </div>
         )}

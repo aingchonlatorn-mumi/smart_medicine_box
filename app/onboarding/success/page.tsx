@@ -21,7 +21,8 @@ function SuccessScreen() {
   const name = (session?.name || '').replace(/^คุณ\s*/, '');
 
   useEffect(() => {
-    const timer = setTimeout(() => router.replace('/dashboard'), 3000);
+    // ไปหน้าสแกนยาต่อทันที เพราะยังไม่มีข้อมูลยาให้แสดงในหน้าหลัก
+    const timer = setTimeout(() => router.replace('/setup/scan'), 3000);
     return () => clearTimeout(timer);
   }, [router]);
 
@@ -55,7 +56,7 @@ function SuccessScreen() {
       </div>
 
       <div className="w-full mt-1.5">
-        <div className="mb-2.5 text-[14px] text-indigo-200">กำลังพาไปหน้าหลัก...</div>
+        <div className="mb-2.5 text-[14px] text-indigo-200">กำลังพาไปขั้นตอนใส่ยา...</div>
         <div className="h-1.5 rounded-full bg-white/25 overflow-hidden">
           <div className="h-1.5 rounded-full bg-white animate-[bargrow_3s_linear_both]" />
         </div>

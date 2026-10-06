@@ -7,7 +7,8 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '@/lib/session';
 import { MEAL_LABEL } from '@/lib/schedule';
-import { DOW_KEYS, DOW_TH, DOW_TH_FULL, hhmm, thaiDate } from '@/lib/time';
+import { MEDICINE_TYPES, medicineByCode } from '@/lib/medicines';
+import { DOW_KEYS, DOW_TH, DOW_TH_FULL, hhmm, thaiDate, timeOf } from '@/lib/time';
 import type { MealRelation, MeResponse, ScheduleType } from '@/lib/types';
 import {
   Card, ErrorNote, FieldLabel, Loading, Modal, PrimaryButton, SectionTitle,
@@ -22,7 +23,8 @@ interface DoseDraft {
 }
 
 interface Draft {
-  name: string;
+  /** รหัสชนิดยาจากรายการที่ระบบรองรับ — ดู lib/medicines.ts */
+  code: string;
   total_pills: number;
   expire_date: string;
   schedule_type: ScheduleType;
@@ -40,7 +42,7 @@ const TYPE_OPTIONS: Array<{ value: ScheduleType; title: string; sub: string }> =
 const MEALS: MealRelation[] = ['before', 'after', 'none'];
 
 const EMPTY_DRAFT: Draft = {
-  name: '',
+  code: '',
   total_pills: 0,
   expire_date: '',
   schedule_type: 'daily',
@@ -54,7 +56,7 @@ function draftFrom(me: MeResponse | null): Draft {
   if (!me) return EMPTY_DRAFT;
   const first = me.schedules[0];
   return {
-    name: me.medicine?.name || '',
+    code: me.medicine?.code || '',
     total_pills: me.medicine?.total_pills ?? 0,
     expire_date: me.medicine?.expire_date?.slice(0, 10) || '',
     schedule_type: (first?.schedule_type as ScheduleType) || 'daily',
@@ -122,7 +124,7 @@ export default function SchedulePage() {
   const mode = modeOverride ?? (hasSaved ? 'summary' : 'edit');
 
   // ขั้นที่ 1 ต้องครบก่อน ส่วนตั้งตารางถึงจะเปิดให้ใช้
-  const medicineReady = form.name.trim().length > 0 && form.total_pills > 0;
+  const medicineReady = form.code.length > 0 && form.total_pills > 0;
 
   const updateDose = (index: number, changes: Partial<DoseDraft>) => {
     patch({ doses: form.doses.map((dose, i) => (i === index ? { ...dose, ...changes } : dose)) });
@@ -152,7 +154,7 @@ export default function SchedulePage() {
     setNotice('');
 
     try {
-      if (!medicineReady) throw new Error('กรุณากรอกชื่อยาและจำนวนเม็ดให้ครบก่อน');
+      if (!medicineReady) throw new Error('กรุณาเลือกชนิดยาและกรอกจำนวนเม็ดให้ครบก่อน');
       if (!form.doses.length) throw new Error('กรุณาเพิ่มอย่างน้อย 1 มื้อ');
 
       const { medicine: saved } = await apiFetch<{ medicine: { medicine_id: string } }>(
@@ -161,7 +163,7 @@ export default function SchedulePage() {
           method: 'PUT',
           body: JSON.stringify({
             medicine_id: medicine?.medicine_id,
-            name: form.name.trim(),
+            code: form.code,
             total_pills: form.total_pills,
             expire_date: form.expire_date || null,
           }),
@@ -383,22 +385,46 @@ export default function SchedulePage() {
               )}
             </div>
 
+            {/* เลือกจากรายการเท่านั้น เพราะระบบนับเม็ดยาได้เฉพาะชนิดที่ใช้ฝึกแบบจำลอง
+                ถ้าปล่อยให้พิมพ์ชื่อเอง จะลงทะเบียนยาที่ระบบยืนยันการทานให้ไม่ได้ */}
             <div className="flex flex-col gap-[7px]">
-              <FieldLabel>ชื่อยา</FieldLabel>
+              <FieldLabel>ชนิดยา</FieldLabel>
               <div className="h-14 rounded-[18px] flex items-center gap-3 px-3.5 bg-white border-2 border-slate-200 focus-within:border-indigo-600 focus-within:ring-4 focus-within:ring-indigo-50 transition">
                 <Image src="/medicine1.png" alt="ยา" width={34} height={34} className="object-contain" />
-                <input
-                  value={form.name}
-                  onChange={(e) => patch({ name: e.target.value })}
-                  placeholder="เช่น Metformin 500"
+                <select
+                  value={form.code}
+                  onChange={(e) => patch({ code: e.target.value })}
                   className="flex-1 bg-transparent text-[18px] font-semibold text-slate-900 outline-none"
-                />
+                >
+                  <option value="">— เลือกชนิดยา —</option>
+                  {MEDICINE_TYPES.map((type) => (
+                    <option key={type.code} value={type.code}>
+                      {type.nameTh} ({type.nameEn})
+                    </option>
+                  ))}
+                </select>
               </div>
+              <span className="text-[13px] leading-relaxed text-slate-500">
+                {medicineByCode(form.code)?.description
+                  ?? 'ระบบรองรับยา 6 ชนิด เพราะเป็นชนิดที่ใช้ฝึกแบบจำลองจำแนกและนับเม็ดยา'}
+              </span>
             </div>
+
+            {medicine?.count_source === 'camera' && medicine.last_counted_at && (
+              <div className="rounded-2xl bg-indigo-50 px-3.5 py-2.5 text-[13px] leading-relaxed text-indigo-700">
+                ยอดคงเหลือนี้มาจากการนับด้วยกล้องเมื่อ {timeOf(medicine.last_counted_at)} น.
+                ระบบจะนับใหม่ทุกครั้งที่เปิดกล่อง หากแก้ตัวเลขเอง ระบบจะถือว่าเป็นค่าที่กรอกด้วยมือจนกว่าจะนับครั้งถัดไป
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-2.5">
               <div className="flex flex-col gap-[7px]">
-                <FieldLabel>จำนวนเม็ดในกล่อง</FieldLabel>
+                <FieldLabel>
+                  จำนวนเม็ดในกล่อง
+                  {medicine?.count_source === 'camera' && (
+                    <span className="ml-1.5 text-indigo-600">· กล้องนับให้</span>
+                  )}
+                </FieldLabel>
                 <div className="h-14 rounded-[18px] border-2 border-slate-200 bg-white flex items-center justify-between px-3.5 focus-within:border-indigo-600 focus-within:ring-4 focus-within:ring-indigo-50 transition">
                   <input
                     type="number"
@@ -432,7 +458,7 @@ export default function SchedulePage() {
             <div className="flex items-center gap-2.5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3.5 text-[13.5px] leading-relaxed text-slate-500">
               <Lock size={18} className="shrink-0 text-slate-400" />
               <span>
-                กรอก <b className="text-slate-700">ชื่อยา</b> และ{' '}
+                เลือก <b className="text-slate-700">ชนิดยา</b> และกรอก{' '}
                 <b className="text-slate-700">จำนวนเม็ด</b> ให้ครบก่อน
                 แล้วส่วนตั้งตารางด้านล่างจะเปิดให้ตั้งเวลา
               </span>

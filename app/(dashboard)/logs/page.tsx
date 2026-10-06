@@ -2,12 +2,13 @@
 
 import { useState } from 'react';
 import Image from 'next/image';
-import { Clock, XCircle } from 'lucide-react';
+import { ChevronDown, Clock, ImageOff, Loader2, XCircle } from 'lucide-react';
 import { groupLogsByDate, type DoseSlot } from '@/lib/schedule';
 import { dayLabel, humanMinutes, timeOf } from '@/lib/time';
 import type { Medicine } from '@/lib/types';
-import { Chip, ErrorNote, Loading, SectionTitle, StateBadge } from '@/app/components/ui';
+import { Chip, ErrorNote, FieldLabel, Loading, SectionTitle, StateBadge } from '@/app/components/ui';
 import { useApiResource } from '@/app/components/useApiResource';
+import { apiFetch } from '@/lib/session';
 
 type Filter = 'all' | 'taken' | 'missed';
 
@@ -74,12 +75,33 @@ export default function LogsPage() {
   );
 }
 
+/** ภาพหลักฐานของมื้อหนึ่ง โหลดเมื่อผู้ใช้กดเปิดดูเท่านั้น ไม่ต้องดึงทุกแถวตั้งแต่แรก */
+interface Evidence {
+  images: Array<{ image_id: string; url: string; sequence: number }>;
+  pills_before: number | null;
+  pills_after: number | null;
+}
+
 function LogRow({ slot, medicineName }: { slot: DoseSlot; medicineName?: string }) {
   const late = slot.state === 'late' && slot.delay_minutes;
+  const [open, setOpen] = useState(false);
+  const [evidence, setEvidence] = useState<Evidence | null>(null);
+  const [loadingImages, setLoadingImages] = useState(false);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || evidence || !slot.log_id) return;
+    setLoadingImages(true);
+    apiFetch<Evidence>(`/api/images?log_id=${slot.log_id}`)
+      .then(setEvidence)
+      .catch(() => setEvidence({ images: [], pills_before: null, pills_after: null }))
+      .finally(() => setLoadingImages(false));
+  };
 
   return (
     <div
-      className={`bg-white rounded-[20px] p-3.5 flex items-center gap-3.5 border ${
+      className={`bg-white rounded-[20px] border ${
         slot.state === 'missed'
           ? 'border-rose-200'
           : slot.state === 'pending'
@@ -87,6 +109,7 @@ function LogRow({ slot, medicineName }: { slot: DoseSlot; medicineName?: string 
             : 'border-slate-100'
       }`}
     >
+     <div className="p-3.5 flex items-center gap-3.5">
       <div className="w-14 h-14 rounded-2xl overflow-hidden shrink-0">
         {slot.image_url ? (
           <Image
@@ -122,10 +145,71 @@ function LogRow({ slot, medicineName }: { slot: DoseSlot; medicineName?: string 
         </div>
       </div>
 
-      <StateBadge
-        state={slot.state}
-        label={late ? `เลท ${humanMinutes(slot.delay_minutes || 0)}` : undefined}
-      />
+      <div className="flex items-center gap-1.5">
+        <StateBadge
+          state={slot.state}
+          label={late ? `เลท ${humanMinutes(slot.delay_minutes || 0)}` : undefined}
+        />
+        {slot.log_id && (
+          <button
+            type="button"
+            onClick={toggle}
+            aria-label={open ? 'ซ่อนภาพหลักฐาน' : 'ดูภาพหลักฐาน'}
+            className="p-1.5 text-slate-400 hover:text-slate-600"
+          >
+            <ChevronDown size={18} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+          </button>
+        )}
+      </div>
+     </div>
+
+      {open && (
+        <div className="border-t border-slate-100 px-3.5 py-3 flex flex-col gap-2.5">
+          {loadingImages && (
+            <div className="flex items-center gap-2 text-[13px] text-slate-400">
+              <Loader2 size={14} className="animate-spin" />
+              กำลังโหลดภาพ
+            </div>
+          )}
+
+          {!loadingImages && evidence && evidence.images.length === 0 && (
+            <div className="flex items-center gap-2 text-[13px] text-slate-400">
+              <ImageOff size={14} />
+              ไม่มีภาพของมื้อนี้
+            </div>
+          )}
+
+          {evidence && evidence.images.length > 0 && (
+            <div className="flex gap-2.5 overflow-x-auto pb-1">
+              {evidence.images.map((image, index) => (
+                <Image
+                  key={image.image_id}
+                  src={image.url}
+                  alt={`ภาพเฟรมที่ ${index + 1}`}
+                  width={132}
+                  height={132}
+                  unoptimized
+                  className="h-[132px] w-[132px] shrink-0 rounded-2xl border border-slate-100 object-cover"
+                />
+              ))}
+            </div>
+          )}
+
+          {evidence && evidence.pills_after !== null && (
+            <div className="flex items-center gap-2 rounded-2xl bg-slate-50 px-3.5 py-2.5">
+              <FieldLabel>จำนวนยาในกล่อง</FieldLabel>
+              <span className="text-[14px] text-slate-700">
+                ก่อน {evidence.pills_before ?? '-'} เม็ด → หลัง {evidence.pills_after} เม็ด
+                {evidence.pills_before !== null && (
+                  <b className="ml-1.5 text-slate-900">
+                    (หยิบไป {evidence.pills_before - evidence.pills_after} เม็ด)
+                  </b>
+                )}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
