@@ -38,16 +38,27 @@ const char* password = "aing0864017741";
 
 const char* API_BASE   = "https://smart-pillbox-rosy.vercel.app";
 const char* BOX_SERIAL = "B-001";
-const char* FIRMWARE   = "2.0.1";
+const char* FIRMWARE   = "2.3.1";
 
 #define REED_PIN       13
 #define FLASH_LED_PIN  4
 
-// ปิดแฟลชไว้ ทดสอบแล้วว่าทำให้ไฟตกจนบอร์ดรีบูต
-#define USE_FLASH      false
+// เปิดไฟส่องสว่างตอนถ่าย เพราะกล่องปิดสนิทแล้วมืดเกินกว่าจะนับเม็ดยาได้
+#define USE_FLASH      true
+// ห้ามเปิดแฟลชเต็มกำลังด้วย digitalWrite เพราะไฟ LED บนบอร์ด AI-Thinker กินกระแสสูงมาก
+// จนแรงดันตกและบอร์ดรีเซ็ตเอง (Brownout) โดยเฉพาะตอน WiFi กำลังส่งข้อมูล
+// จึงหรี่ด้วย PWM แทน ถ้ายังเจอบอร์ดรีเซ็ตให้ลดค่านี้ลงอีก
+#define FLASH_DUTY     60      // 0-255 (60 ≈ 23% ของความสว่างเต็ม)
+#define FLASH_FREQ     5000
+#define FLASH_CHANNEL  7       // ช่อง 0 ถูกกล้องใช้เป็น XCLK แล้ว ห้ามใช้ซ้ำ
+// หน่วงให้ระบบวัดแสงอัตโนมัติของกล้องปรับตัวเข้ากับแสงแฟลชก่อนถ่ายจริง
+#define FLASH_SETTLE_MS 250
 
 const unsigned long debounceDelay   = 50;
-const unsigned long FRAME_GAP_MS    = 1200;
+// ถ่ายภาพหลังปิดฝา ไม่ใช่ระหว่างฝาเปิด เพราะตอนฝาปิดจะไม่มีมือบังและเม็ดยาหยุดนิ่งแล้ว
+// ทำให้การนับเม็ดยาแม่นยำขึ้น แลกกับการต้องใช้ไฟส่องสว่างในกล่องที่ปิดสนิท
+const unsigned long CLOSE_SETTLE_MS = 600;    // รอให้เม็ดยาหยุดกลิ้งก่อนถ่าย
+const unsigned long FRAME_GAP_MS    = 400;
 const uint8_t       MAX_FRAMES      = 3;
 const unsigned long MAX_OPEN_MS     = 120000;
 const unsigned long HEARTBEAT_MS    = 900000;
@@ -79,6 +90,8 @@ String deviceKey;      // ตัวยืนยันตัวตน เก็�
 uint8_t* frames[MAX_FRAMES];
 size_t   frameSizes[MAX_FRAMES];
 uint8_t  frameCount = 0;
+
+unsigned long cycleCount = 0;   // นับรอบเปิด-ปิดฝา ใช้อ้างอิงตอนทำการทดลอง
 
 int lastState = LOW;
 int stableState = LOW;
@@ -127,7 +140,18 @@ void setupCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;   // 640x480
   config.jpeg_quality = 12;
-  config.fb_count = 1;
+
+  // บอร์ดนี้คืนเฟรมเก่าที่ค้างอยู่ในบัฟเฟอร์ได้ ถ้าใช้บัฟเฟอร์เดียวและโหมดมาตรฐาน
+  // ผลคือภาพที่ได้อาจเป็นภาพตอนฝายังเปิดอยู่ ซึ่งมีมือบังและเม็ดยายังไม่นิ่ง
+  // ใช้สองบัฟเฟอร์คู่กับโหมดเอาเฟรมล่าสุด เพื่อให้ได้ภาพ ณ เวลาที่สั่งถ่ายจริง
+  if (psramFound()) {
+    config.fb_count   = 2;
+    config.grab_mode  = CAMERA_GRAB_LATEST;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
+  } else {
+    config.fb_count  = 1;
+    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  }
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -139,15 +163,36 @@ void setupCamera() {
 
 /**
  * ถ่าย 1 เฟรม แล้วคัดลอกออกมาเก็บใน PSRAM
- * ต้องคัดลอกเพราะ fb_count = 1 ถ้าถือ frame buffer ไว้จะถ่ายเฟรมถัดไปไม่ได้
+ * ต้องคัดลอกเพราะบัฟเฟอร์ของกล้องมีจำกัด ถ้าถือไว้จะถ่ายเฟรมถัดไปไม่ได้
  * และต้องใช้ ps_malloc เพราะ Internal SRAM เหลือไม่พอเก็บภาพ VGA หลายเฟรม
  */
+/** เปิด-ปิดไฟแฟลชแบบหรี่ได้ รองรับทั้ง Arduino core รุ่น 2.x และ 3.x */
+void setFlash(uint8_t duty) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(FLASH_LED_PIN, duty);
+#else
+  ledcWrite(FLASH_CHANNEL, duty);
+#endif
+}
+
+/**
+ * ทิ้งเฟรมที่ค้างอยู่ในบัฟเฟอร์
+ * ต้องทิ้งแม้จะตั้งโหมดเอาเฟรมล่าสุดไว้แล้ว เพราะเฟรมแรกหลังกล้องว่างมานาน
+ * ยังใช้ค่าแสงและสมดุลสีชุดเก่า ภาพจึงสว่างไม่เท่าเฟรมถัด ๆ ไป
+ */
+void discardFrames(uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) esp_camera_fb_return(fb);
+    delay(60);
+  }
+}
+
+/** ถ่ายหนึ่งเฟรมเก็บลงหน่วยความจำ — ผู้เรียกเป็นผู้จัดการไฟส่องสว่างเอง */
 void captureFrame() {
   if (frameCount >= MAX_FRAMES) return;
 
-  if (USE_FLASH) { digitalWrite(FLASH_LED_PIN, HIGH); delay(120); }
   camera_fb_t* fb = esp_camera_fb_get();
-  if (USE_FLASH) digitalWrite(FLASH_LED_PIN, LOW);
 
   if (!fb) {
     Serial.println("❌ ถ่ายภาพล้มเหลว");
@@ -168,6 +213,32 @@ void captureFrame() {
   }
 
   esp_camera_fb_return(fb);
+}
+
+/**
+ * ถ่ายภาพเป็นชุดหลังปิดฝา
+ * เปิดไฟค้างไว้ตลอดชุดแทนการเปิด-ปิดทีละเฟรม เพื่อให้ระบบวัดแสงอัตโนมัติของกล้อง
+ * ปรับตัวเพียงครั้งเดียว ทุกเฟรมจึงมีความสว่างใกล้เคียงกันและนำไปเทียบกันได้
+ */
+void captureBurst() {
+  freeFrames();
+
+  if (USE_FLASH) {
+    setFlash(FLASH_DUTY);
+    delay(FLASH_SETTLE_MS);
+  }
+
+  // ทิ้งเฟรมค้างทุกครั้ง ไม่ใช่เฉพาะตอนเปิดไฟ เพราะกล้องว่างมาตั้งแต่ปิดฝาครั้งก่อน
+  // เฟรมที่ค้างอยู่จึงเป็นภาพเก่าที่ถ่ายไว้คนละจังหวะกับที่ต้องการ
+  discardFrames(2);
+
+  for (uint8_t i = 0; i < MAX_FRAMES; i++) {
+    captureFrame();
+    if (i < MAX_FRAMES - 1) delay(FRAME_GAP_MS);
+  }
+
+  if (USE_FLASH) setFlash(0);
+  Serial.printf(".. [INFO] ถ่ายภาพหลังปิดฝาได้ %d เฟรม\n", frameCount);
 }
 
 void freeFrames() {
@@ -193,6 +264,37 @@ void handleJpg() {
   client.write(frames[frameCount - 1], frameSizes[frameCount - 1]);
 }
 
+/**
+ * ภาพสด ณ เวลาที่เรียก — คนละอย่างกับ "/" ที่คืนภาพชุดล่าสุดตอนปิดฝา
+ * มีไว้ให้สคริปต์ทดสอบฝั่งคอมพิวเตอร์ดึงภาพไปเข้าแบบจำลองได้โดยไม่ต้องเปิด-ปิดฝา
+ * เรียกซ้ำได้เรื่อย ๆ และได้ภาพใหม่ทุกครั้ง จึงไม่ต้องยิงทิ้งเพื่อไล่เฟรมค้าง
+ *
+ *   GET /live        ถ่ายด้วยแสงที่มีอยู่
+ *   GET /live?flash=1  เปิดไฟส่องสว่างเหมือนตอนถ่ายจริง
+ */
+void handleLive() {
+  bool useFlash = server.hasArg("flash") && server.arg("flash") != "0";
+
+  if (useFlash) {
+    setFlash(FLASH_DUTY);
+    delay(FLASH_SETTLE_MS);
+  }
+  discardFrames(2);
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (useFlash) setFlash(0);
+
+  if (!fb) {
+    server.send(503, "text/plain; charset=utf-8", "ถ่ายภาพไม่สำเร็จ");
+    return;
+  }
+
+  WiFiClient client = server.client();
+  client.print("HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nCache-Control: no-store"
+               "\r\nContent-Length: " + String(fb->len) + "\r\nConnection: close\r\n\r\n");
+  client.write(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+}
+
 void handleStatus() {
   String html = "<meta charset='utf-8'><body style='font-family:sans-serif;padding:20px'>";
   html += "<h2>Smart PillBox Status</h2>";
@@ -202,7 +304,8 @@ void handleStatus() {
   html += "ฝาตอนนี้: <b>" + String(stableState == HIGH ? "เปิด" : "ปิด") + "</b><br>";
   html += "PSRAM คงเหลือ: <b>" + String(ESP.getFreePsram() / 1024) + " KB</b><br>";
   html += "เฟิร์มแวร์: " + String(FIRMWARE) + "</p>";
-  html += "<p><a href='/'>ดูภาพล่าสุด</a></p></body>";
+  html += "<p><a href='/'>ดูภาพชุดล่าสุดตอนปิดฝา</a> · ";
+  html += "<a href='/live?flash=1'>ถ่ายภาพสดเดี๋ยวนี้</a></p></body>";
   server.send(200, "text/html; charset=utf-8", html);
 }
 
@@ -273,6 +376,10 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
   addField("event", eventType);
   // ชื่อฟิลด์ต้องตรงกับที่เซิร์ฟเวอร์อ่าน ไม่งั้นระยะเวลาเปิดฝาจะเป็น null
   // แล้วตัวกรอง "เปิดแวบเดียวไม่นับเป็นการหยิบยา" จะไม่ทำงาน
+  // ส่งเป็นมิลลิวินาทีตามที่วัดได้จริง ไม่ปัดเป็นวินาที
+  // การปัดทำให้การเปิด 1.9 วินาทีกลายเป็น 1 แล้วเซิร์ฟเวอร์คัดทิ้งว่าเปิดสั้นเกินไป
+  addField("lid_open_ms", String(openMs));
+  // คงฟิลด์เดิมไว้ด้วย เผื่อเซิร์ฟเวอร์รุ่นเก่ายังอ่านชื่อนี้
   addField("lid_open_seconds", String(openMs / 1000));
   addField("firmware", FIRMWARE);
 
@@ -338,8 +445,14 @@ void setup() {
   delay(300);
 
   pinMode(REED_PIN, INPUT_PULLUP);
-  pinMode(FLASH_LED_PIN, OUTPUT);
-  digitalWrite(FLASH_LED_PIN, LOW);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(FLASH_LED_PIN, FLASH_FREQ, 8);
+#else
+  ledcSetup(FLASH_CHANNEL, FLASH_FREQ, 8);
+  ledcAttachPin(FLASH_LED_PIN, FLASH_CHANNEL);
+#endif
+  setFlash(0);
 
   if (psramFound()) {
     Serial.printf("✅ พบ PSRAM: %d bytes\n", ESP.getFreePsram());
@@ -374,6 +487,7 @@ void setup() {
   Serial.println(WiFi.localIP());
 
   server.on("/", handleJpg);
+  server.on("/live", handleLive);
   server.on("/status", handleStatus);
   server.begin();
 
@@ -395,7 +509,6 @@ void loop() {
   server.handleClient();
 
   static unsigned long openedAt      = 0;
-  static unsigned long lastFrameAt   = 0;
   static unsigned long lastHeartbeat = 0;
 
   int reading = digitalRead(REED_PIN);
@@ -407,24 +520,32 @@ void loop() {
     if (stableState == HIGH) {
       Serial.println(">> [EVENT] ตรวจพบการเปิดฝา");
       openedAt = millis();
-      lastFrameAt = 0;
-      freeFrames();
+      // แจ้งเซิร์ฟเวอร์ทันทีว่าฝาถูกเปิด เพื่อบันทึกเวลาเริ่มไว้แม้ภาพจะยังไม่ถูกส่ง
+      sendEvent("lid_open", 0);
     } else {
       unsigned long openMs = millis() - openedAt;
-      Serial.printf(".. [INFO] ปิดฝาแล้ว เปิดค้าง %.1f วินาที ถ่ายได้ %d เฟรม\n",
-                    openMs / 1000.0, frameCount);
-      sendEvent("lid_close", openMs);
+      Serial.printf(".. [INFO] ปิดฝาแล้ว เปิดค้าง %lu ms\n", openMs);
+      unsigned long t0 = millis();
+      delay(CLOSE_SETTLE_MS);
+      captureBurst();
+      unsigned long captureMs = millis() - t0;
+
+      unsigned long t1 = millis();
+      bool sent = sendEvent("lid_close", openMs);
+      unsigned long uploadMs = millis() - t1;
+
+      // พิมพ์เป็นบรรทัดคั่นด้วยจุลภาค เพื่อให้คัดลอกไปทำตารางผลการทดลองได้ทันที
+      // หัวตาราง: cycle,open_ms,frames,bytes,capture_ms,upload_ms,ok
+      size_t totalBytes = 0;
+      for (uint8_t i = 0; i < frameCount; i++) totalBytes += frameSizes[i];
+      cycleCount++;
+      Serial.printf("CSV,%lu,%lu,%u,%u,%lu,%lu,%d\n",
+                    cycleCount, openMs, frameCount, (unsigned)totalBytes,
+                    captureMs, uploadMs, sent ? 1 : 0);
       // ไม่ล้างเฟรมทันที เพื่อให้เปิดหน้าเว็บดูภาพล่าสุดได้
     }
   }
   lastState = reading;
-
-  // ถ่ายหลายเฟรมตลอดช่วงที่ฝาเปิด เพราะเฟรมเดียวมักไม่ทันจังหวะที่มือเข้ามา
-  if (stableState == HIGH && frameCount < MAX_FRAMES &&
-      (millis() - lastFrameAt) > FRAME_GAP_MS) {
-    lastFrameAt = millis();
-    captureFrame();
-  }
 
   // เปิดค้างนานผิดปกติ แจ้งครั้งเดียวแล้วรีเซ็ตตัวจับเวลา
   if (stableState == HIGH && (millis() - openedAt) > MAX_OPEN_MS) {
