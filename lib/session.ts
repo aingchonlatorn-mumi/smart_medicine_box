@@ -41,6 +41,18 @@ export function clearSession(): void {
   for (const key of Object.values(KEYS)) localStorage.removeItem(key);
 }
 
+/**
+ * คำตอบนี้แปลว่ารหัสผู้ใช้ที่เก็บไว้ไม่ถูกต้องแล้วหรือไม่
+ * แยกจากข้อผิดพลาดชั่วคราวอื่น เช่นเครือข่ายขัดข้องหรือเซิร์ฟเวอร์มีปัญหา
+ * ซึ่งไม่ควรล้างข้อมูลที่จำไว้ เพราะผู้ใช้ยังเข้าสู่ระบบอยู่
+ */
+function isStaleSession(status: number, body: unknown): boolean {
+  if (status === 401) return true;
+  if (status !== 404) return false;
+  const message = (body as { error?: unknown })?.error;
+  return typeof message === 'string' && message.includes('ไม่พบข้อมูลผู้ใช้');
+}
+
 /** เรียก /api/* พร้อมแนบตัวตนผู้ใช้ */
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const session = getSession();
@@ -54,6 +66,17 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   });
 
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body?.error || `เรียก ${path} ไม่สำเร็จ (${res.status})`);
+
+  if (!res.ok) {
+    // รหัสผู้ใช้ที่จำไว้ในเครื่องใช้ไม่ได้แล้ว เช่นบัญชีถูกลบออกจากระบบ
+    // ถ้าปล่อยไว้ ผู้ใช้จะติดอยู่ที่หน้าแสดงข้อผิดพลาดโดยไม่มีทางออก
+    // เพราะทุกหน้าในส่วนที่ต้องเข้าสู่ระบบจะเรียก API ด้วยรหัสเดิมซ้ำไปเรื่อย ๆ
+    if (session && isStaleSession(res.status, body)) {
+      clearSession();
+      if (typeof window !== 'undefined') window.location.replace('/');
+    }
+    throw new Error(body?.error || `เรียก ${path} ไม่สำเร็จ (${res.status})`);
+  }
+
   return body as T;
 }
