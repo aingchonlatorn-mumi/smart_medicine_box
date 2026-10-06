@@ -1,6 +1,6 @@
 /* =============================================================================
    Smart PillBox — AI-Thinker ESP32-CAM + reed switch MC-38
-   เฟิร์มแวร์ 2.0.1
+   เฟิร์มแวร์ 2.3.2
 
    หน้าที่ของบอร์ด: รายงาน "สิ่งที่เห็น" เท่านั้น ไม่ตัดสินว่าทานยาแล้วหรือยัง
    การตีความอยู่ฝั่งเซิร์ฟเวอร์ทั้งหมด แก้กฎได้โดยไม่ต้อง flash บอร์ดใหม่
@@ -14,8 +14,14 @@
    ⚠ ห้ามย้ายไป GPIO12 — เป็น strapping pin (MTDI) ที่ ESP32 อ่านตอนบูต
      ถ้าโดนดึง HIGH ตอนบูต (ซึ่งเกิดพอดีเวลาฝาเปิดค้างอยู่) บอร์ดจะบูตไม่ขึ้น
 
-   ไฟเลี้ยง: จ่าย 5V เข้าขา 5V โดยตรง อย่างน้อย 1A
-   Arduino IDE: Board = AI Thinker ESP32-CAM, PSRAM = Enabled
+   ไฟเลี้ยง: จ่าย 5V เข้าขา 5V โดยตรง อย่างน้อย 1A และต่อตัวเก็บประจุ 470–1000uF
+     คร่อม 5V กับ GND ใกล้บอร์ด ถ้าจ่ายไฟผ่านสาย USB-TTL อย่างเดียวจะไม่พอ
+     บอร์ดจะรีเซ็ตตัวเองตอนเปิด WiFi หรือเปิดไฟส่องสว่าง
+
+   Arduino IDE
+     Board            = AI Thinker ESP32-CAM
+     Partition Scheme = Huge APP (3MB No OTA/1MB SPIFFS)
+     PSRAM            = Enabled
    ============================================================================= */
 
 #include "esp_camera.h"
@@ -24,6 +30,8 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"   // ใช้ปิดวงจรตรวจไฟตก
 
 // อ่าน MAC จาก eFuse โดยตรง (รองรับทั้ง arduino-esp32 v2 และ v3)
 #if __has_include("esp_mac.h")
@@ -38,7 +46,7 @@ const char* password = "aing0864017741";
 
 const char* API_BASE   = "https://smart-pillbox-rosy.vercel.app";
 const char* BOX_SERIAL = "B-001";
-const char* FIRMWARE   = "2.3.1";
+const char* FIRMWARE   = "2.3.3";
 
 #define REED_PIN       13
 #define FLASH_LED_PIN  4
@@ -429,18 +437,42 @@ bool sendEvent(const char* eventType, unsigned long openMs) {
 
   Serial.printf("upload [%d] %s\n", code, res.c_str());
 
-  // คีย์ใช้ไม่ได้แล้ว (เช่นแอดมินล้าง device_mac) → ขอผูกใหม่รอบหน้า
-  if (code == 401) {
+  // คีย์ใช้ไม่ได้แล้ว เกิดได้สองแบบ
+  //   401 คีย์ผิด
+  //   400 ฝั่งเซิร์ฟเวอร์ไม่มีบอร์ดผูกไว้กับกล่องนี้ เช่นหลังล้างฐานข้อมูล
+  // ทั้งสองกรณีต้องทิ้งคีย์เดิมแล้วขอใหม่ ไม่งั้นบอร์ดจะส่งคีย์ที่ใช้ไม่ได้ซ้ำไปตลอด
+  if (code == 400 || code == 401) {
+    Serial.println("คีย์เดิมใช้ไม่ได้ ล้างออกแล้วขอใหม่");
     prefs.begin("pillbox", false);
     prefs.remove("key");
     prefs.end();
     deviceKey = "";
+
+    // ขอคีย์ใหม่แล้วส่งซ้ำทันที เพื่อไม่ให้เสียเหตุการณ์นี้ไปเปล่า ๆ
+    // ใช้ตัวแปรกันไว้ไม่ให้เรียกซ้ำซ้อนเกินหนึ่งชั้น ถ้าขอคีย์ใหม่แล้วยังไม่ผ่าน
+    static bool retrying = false;
+    if (!retrying && provision()) {
+      retrying = true;
+      bool ok = sendEvent(eventType, openMs);
+      retrying = false;
+      return ok;
+    }
   }
   return code == 200;
 }
 
 /* ------------------------------- setup ------------------------------- */
 void setup() {
+  // ปิดวงจรตรวจไฟตกก่อนทำอย่างอื่นทั้งหมด
+  //
+  // บอร์ด AI-Thinker กินกระแสพุ่งสูงตอนเปิดภาครับส่งสัญญาณไร้สายและตอนเปิดไฟ
+  // ส่องสว่าง ถ้าแหล่งจ่ายไฟส่งไม่ทัน แรงดันจะตกจนวงจรนี้สั่งรีเซ็ตบอร์ด แล้ว
+  // วนบูตใหม่ไม่จบ ซึ่งเกิดขึ้นจริงกับบอร์ดชุดนี้
+  //
+  // การปิดวงจรนี้เป็นการแก้ที่ปลายเหตุ ต้นเหตุคือแหล่งจ่ายไฟ ควรจ่ายไฟผ่านขา 5V
+  // ด้วยอะแดปเตอร์ที่จ่ายได้อย่างน้อย 1 แอมแปร์ และต่อตัวเก็บประจุคร่อมไฟเลี้ยง
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
   Serial.begin(115200);
   delay(300);
 
@@ -463,6 +495,9 @@ void setup() {
   setupCamera();
 
   WiFi.mode(WIFI_STA);
+  // ลดกำลังส่งลงจากค่าสูงสุด เพื่อให้กระแสพุ่งตอนส่งข้อมูลน้อยลง
+  // ระยะใช้งานจริงอยู่ในบ้าน จึงไม่ต้องใช้กำลังส่งเต็มที่
+  WiFi.setTxPower(WIFI_POWER_13dBm);
   deviceMac = readMacFromEfuse();
   Serial.println("MAC ของบอร์ดนี้: " + deviceMac);
 

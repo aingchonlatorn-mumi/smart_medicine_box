@@ -39,6 +39,8 @@ export async function GET(req: Request) {
     // ชนิดยาที่ระบบรองรับ ส่งไปให้หน้าเว็บทำเป็นตัวเลือก ผู้ใช้พิมพ์ชื่อเองไม่ได้
     catalog: MEDICINE_TYPES,
     recognised: Boolean(medicine.code),
+    // false = กล่องส่งภาพมาแล้วแต่ยังนับไม่ได้ ผู้ใช้ต้องกรอกจำนวนเอง
+    counted: detection.counted !== false,
   });
 }
 

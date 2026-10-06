@@ -45,7 +45,13 @@ export async function POST(req: Request) {
   try {
     const auth = await authenticateDevice(req);
     if (!auth.ok || !auth.box) {
-      const status = auth.error === 'bad_key' ? 401 : auth.error === 'unknown_device' ? 404 : 400;
+      // ตอบ 401 ทั้งกรณีคีย์ผิดและกรณีที่ยังไม่มีบอร์ดผูกไว้กับกล่อง
+      // เพราะทั้งสองแบบแปลว่าคีย์ที่บอร์ดถืออยู่ใช้ไม่ได้แล้ว บอร์ดจะได้ล้างคีย์
+      // แล้วขอใหม่เองตามที่เฟิร์มแวร์เขียนไว้ แทนที่จะส่งคีย์เดิมซ้ำไปตลอด
+      const status =
+        auth.error === 'bad_key' || auth.error === 'not_provisioned' ? 401
+          : auth.error === 'unknown_device' ? 404
+            : 400;
       return jsonError(auth.message || 'ยืนยันตัวตนอุปกรณ์ไม่สำเร็จ', status);
     }
     const box = auth.box;
@@ -117,31 +123,28 @@ export async function POST(req: Request) {
       warnings.push(...shot.warnings);
 
       const vision = await analyzePills(await buffersOf(files));
-      if (!vision) {
-        note(await recordDeviceEvent({
-          boxId: box.box_id, eventType, occurredAt: openedAt, lidOpenSeconds: openSeconds, lidOpenMs: openMs,
-          detail: { note: 'สแกนตั้งค่าครั้งแรก แต่ยังประมวลผลภาพไม่ได้' },
-        }));
-        return NextResponse.json({
-          ok: true, setup: true, counted: null,
-          images: shot.urls.length, warnings: [...warnings, 'ยังไม่ได้ตั้งค่าบริการประมวลผลภาพ'],
-        });
-      }
 
       // รับเฉพาะยาที่อยู่ในรายการที่โมเดลจำแนกได้ ถ้าไม่ตรงจะปล่อย code ว่างไว้
       // แล้วให้ผู้ใช้เลือกเองในหน้าเว็บ ดีกว่าบันทึกชื่อที่ระบบยืนยันต่อไม่ได้
-      const scanned = medicineByCode(vision.medicine_code);
+      const scanned = vision ? medicineByCode(vision.medicine_code) : null;
       // กล่องรองรับยาชนิดเดียว ยอดตั้งต้นจึงนับเฉพาะชนิดที่จำแนกได้
-      const scannedCount = countOf(vision, scanned?.code ?? null);
-      const scannedOthers = foreignIn(vision, scanned?.code ?? null);
+      const scannedCount = vision ? countOf(vision, scanned?.code ?? null) : 0;
+      const scannedOthers = vision ? foreignIn(vision, scanned?.code ?? null) : {};
+
+      // สร้างรายการที่รอยืนยันไว้เสมอเมื่อมีภาพเข้ามา แม้จะยังนับไม่ได้
+      // เพราะกล่องรายงานแล้วว่ามีการใส่ยา ถ้าไม่สร้างไว้ หน้าตั้งค่าจะรอค้างไม่รู้จบ
+      // โดยที่ผู้ใช้ไม่มีทางรู้ว่าต้องทำอะไรต่อ
       const record = {
         code: scanned?.code ?? null,
         name: scanned?.nameTh ?? 'ยังระบุชนิดไม่ได้',
         total_pills: scannedCount,
-        count_source: 'camera' as const,
-        last_counted_at: now.toISOString(),
+        count_source: (vision ? 'camera' : 'manual') as 'camera' | 'manual',
+        last_counted_at: vision ? now.toISOString() : null,
         confirmed: false,
-        detection: { ...detectionPayload(vision), images: shot.urls },
+        detection: {
+          ...(vision ? detectionPayload(vision) : { counted: false }),
+          images: shot.urls,
+        },
       };
 
       const { data: medicine, error } = context.medicine
@@ -153,16 +156,18 @@ export async function POST(req: Request) {
 
       note(await recordDeviceEvent({
         boxId: box.box_id, eventType, occurredAt: openedAt, lidOpenSeconds: openSeconds, lidOpenMs: openMs,
-        detail: { note: 'สแกนตั้งค่าครั้งแรก', counted: vision.count, per_class: vision.per_class },
+        detail: vision
+          ? { note: 'สแกนตั้งค่าครั้งแรก', counted: vision.count, per_class: vision.per_class }
+          : { note: 'สแกนตั้งค่าครั้งแรก แต่ยังประมวลผลภาพไม่ได้', images: shot.urls.length },
       }));
 
       await sendLinePushMessage(
         context.user.line_user_id,
         [
-          '📷 อ่านข้อมูลยาในกล่องเรียบร้อยแล้ว',
+          vision ? '📷 อ่านข้อมูลยาในกล่องเรียบร้อยแล้ว' : '📷 ได้รับภาพจากกล่องแล้ว',
           `ชนิดยา: ${scanned ? `${scanned.nameTh} (${scanned.nameEn})` : 'ยังระบุไม่ได้'}`,
-          `จำนวน: ${scannedCount} เม็ด`,
-          vision.stable ? '' : '(ผลการนับแต่ละภาพไม่เท่ากัน ควรตรวจสอบ)',
+          vision ? `จำนวน: ${scannedCount} เม็ด` : 'ระบบยังนับจำนวนให้ไม่ได้ กรุณากรอกเอง',
+          vision && !vision.stable ? '(ผลการนับแต่ละภาพไม่เท่ากัน ควรตรวจสอบ)' : '',
           Object.keys(scannedOthers).length
             ? `พบยาชนิดอื่นปนอยู่ ${describeClasses(scannedOthers)} กล่องรองรับยาชนิดเดียว กรุณานำออก`
             : '',
@@ -174,9 +179,10 @@ export async function POST(req: Request) {
       return NextResponse.json({
         ok: true, setup: true,
         medicine_id: medicine.medicine_id,
-        counted: scannedCount,
+        counted: vision ? scannedCount : null,
         medicine: scanned?.code ?? null,
         recognised: Boolean(scanned),
+        counted_by_model: Boolean(vision),
         images: shot.urls.length,
         warnings,
       });
