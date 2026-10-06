@@ -1,7 +1,7 @@
 // lib/flex/index.ts — ตัวสร้าง LINE Flex Message ทั้ง 5 แบบตามไฟล์ดีไซน์ (2b)
 // พาเลตต์เดียวกับหน้าเว็บ: indigo #4f46e5 / เขียว #10b981 / เหลือง #f59e0b / แดง #fb7185
 
-import type { DoseState, MealRelation, Medicine, Schedule } from '../types';
+import type { DoseOutcome, DoseState, MealRelation, Medicine, Schedule } from '../types';
 import { MEAL_LABEL, summarizeSchedules } from '../schedule';
 import { DOW_TH, hhmm, thaiDayMonth } from '../time';
 
@@ -265,6 +265,131 @@ export function flexMissedAlert(params: {
       ]),
     },
   };
+}
+
+
+/* ------------------------------------------------------------------ */
+/* 4c · ผลการยืนยันการทานยาหลังปิดฝา (dose result)                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * หน้าตาของแต่ละผลลัพธ์ — สีบอกความหมายก่อนที่ผู้ดูแลจะได้อ่านข้อความ
+ * เขียวคือเรียบร้อย ส้มคือต้องดู แดงคือต้องรีบดู
+ */
+const OUTCOME_LOOK: Record<DoseOutcome, { label: string; color: string; icon: string }> = {
+  taken:      { label: 'ทานยาแล้ว',        color: GREEN,  icon: '✅' },
+  partial:    { label: 'หยิบยาไม่ครบ',      color: AMBER,  icon: '⚠️' },
+  over_dose:  { label: 'หยิบยาเกินขนาด',    color: ROSE,   icon: '🚨' },
+  not_taken:  { label: 'เปิดกล่องแต่ไม่หยิบยา', color: AMBER, icon: '⚠️' },
+  refilled:   { label: 'เติมยาเข้ากล่อง',    color: INDIGO, icon: 'ℹ️' },
+  unverified: { label: 'บันทึกจากการเปิดฝา', color: MUTED,  icon: '✅' },
+};
+
+/** หนึ่งบรรทัดของตารางรายละเอียด ซ้ายเป็นหัวข้อ ขวาเป็นค่า */
+function detailRow(label: string, value: string, color = INK) {
+  return {
+    type: 'box',
+    layout: 'baseline',
+    spacing: 'sm',
+    contents: [
+      { type: 'text', text: label, size: 'sm', color: MUTED, flex: 4 },
+      { type: 'text', text: value, size: 'sm', color, flex: 6, weight: 'bold', wrap: true },
+    ],
+  };
+}
+
+export function flexDoseResult(params: {
+  outcome: DoseOutcome;
+  /** เวลาของมื้อตามตาราง เช่น "08:00" */
+  time: string;
+  /** เวลาที่เปิดฝาจริง เช่น "08:03" */
+  openedAt: string;
+  openSeconds: number | null;
+  medicineName: string;
+  doseAmount: number;
+  /** จำนวนเม็ดก่อนและหลัง นับเฉพาะยาชนิดที่ลงทะเบียนไว้ */
+  pillsBefore: number | null;
+  pillsAfter: number | null;
+  removed: number | null;
+  /** ยาชนิดอื่นที่พบในกล่อง — กล่องรองรับยาชนิดเดียว จึงถือว่าผิดปกติ */
+  foreign: string | null;
+  /** ทุกเฟรมนับได้เท่ากันหรือไม่ */
+  stable: boolean;
+  imageUrl?: string | null;
+  imageCount?: number;
+}) {
+  const look = OUTCOME_LOOK[params.outcome];
+  const { pillsBefore: before, pillsAfter: after, removed } = params;
+
+  const summary =
+    params.outcome === 'not_taken' ? 'จำนวนเม็ดยาไม่เปลี่ยน ระบบจึงยังไม่บันทึกว่าทานยา'
+      : params.outcome === 'refilled' ? `ยาในกล่องเพิ่มขึ้น ยอดคงเหลือตอนนี้ ${after ?? '-'} เม็ด`
+        : params.outcome === 'unverified' ? 'ยังประมวลผลภาพไม่ได้ จึงบันทึกจากการเปิดฝาตรงเวลามื้อ'
+          : removed !== null
+            ? `หยิบยาออกไป ${removed} เม็ด จากที่กำหนดไว้ ${params.doseAmount} เม็ด`
+            : '';
+
+  const bubble: Record<string, unknown> = {
+    type: 'bubble',
+    size: 'mega',
+    body: {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'md',
+      paddingAll: '20px',
+      contents: compact([
+        text(`${look.icon} ${look.label}`, { size: 'sm', weight: 'bold', color: look.color }),
+        {
+          type: 'box',
+          layout: 'vertical',
+          contents: [
+            text(params.medicineName, { weight: 'bold', size: 'xl', color: INK }),
+            text(`มื้อ ${params.time} น.`, { size: 'sm', color: MUTED }),
+          ],
+        },
+        summary ? text(summary, { size: 'sm', color: INK }) : null,
+        { type: 'separator', margin: 'sm', color: '#E2E8F0' },
+        {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          contents: compact([
+            before !== null && after !== null
+              ? detailRow('จำนวนเม็ดยา', `${before} → ${after} เม็ด`)
+              : null,
+            detailRow(
+              'เวลาเปิดฝา',
+              `${params.openedAt} น.${params.openSeconds ? ` นาน ${params.openSeconds} วิ` : ''}`,
+            ),
+            params.imageCount
+              ? detailRow('ภาพหลักฐาน', `${params.imageCount} ภาพ`)
+              : null,
+          ]),
+        },
+        params.foreign
+          ? text(`🚨 พบยาที่ไม่ตรงกับที่ลงทะเบียน: ${params.foreign}`, {
+              size: 'xs', color: ROSE, margin: 'sm',
+            })
+          : null,
+        params.stable ? null : text('ผลการนับแต่ละภาพไม่เท่ากัน ควรตรวจสอบด้วยตา', {
+          size: 'xs', color: AMBER,
+        }),
+        linkButton('ดูประวัติและภาพหลักฐาน', '/logs'),
+      ]),
+    },
+  };
+
+  if (params.imageUrl?.startsWith('https://')) {
+    bubble.hero = {
+      type: 'image',
+      url: params.imageUrl,
+      size: 'full',
+      aspectRatio: '20:13',
+      aspectMode: 'cover',
+    };
+  }
+
+  return bubble;
 }
 
 /* ------------------------------------------------------------------ */

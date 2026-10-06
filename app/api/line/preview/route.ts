@@ -3,15 +3,20 @@ import { jsonError, loadContext, loadSlots, userIdFrom } from '@/lib/api';
 import { summarize } from '@/lib/schedule';
 import { addDays, bangkokToday, dayOfWeek, hhmm } from '@/lib/time';
 import {
-  flexDoseAlert, flexMissedAlert, flexScheduleSummary, flexTerms, flexWeeklyReport, flexWelcome,
+  flexDoseAlert, flexDoseResult, flexMissedAlert, flexScheduleSummary, flexTerms,
+  flexWeeklyReport, flexWelcome,
 } from '@/lib/flex';
+import type { DoseOutcome } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * ดู Flex Message ทั้ง 5 แบบเป็น JSON โดยไม่ต้องส่งจริง
  * เอาไปวางใน LINE Flex Message Simulator เพื่อดูหน้าตาได้เลย
- *   /api/line/preview?type=welcome|terms|schedule|dose|missed|weekly
+ *   /api/line/preview?type=welcome|terms|schedule|dose|missed|weekly|result
+ *
+ * แบบ result รับ ?outcome= เพิ่มได้ เพื่อดูการ์ดครบทุกผลลัพธ์ที่ใช้ในการทดลอง
+ *   taken | partial | over_dose | not_taken | refilled | unverified
  */
 export async function GET(req: Request) {
   const userId = userIdFrom(req);
@@ -64,6 +69,38 @@ export async function GET(req: Request) {
           rangeEnd: today,
           daily,
           deltaPercent: 6,
+        }),
+      );
+    }
+
+    case 'result': {
+      // ค่าตัวอย่างสำหรับดูหน้าตาการ์ด ไม่ได้อ่านจากผลการสแกนจริง
+      const outcome = (new URL(req.url).searchParams.get('outcome') || 'taken') as DoseOutcome;
+      // "หยิบไม่ครบ" ต้องมีขนาดยาอย่างน้อย 2 เม็ด ไม่งั้นตัวอย่างจะกลายเป็น 0 เม็ด
+      // ซึ่งความจริงคือกรณี "เปิดแต่ไม่หยิบ" คนละผลลัพธ์กัน
+      const dose = outcome === 'partial'
+        ? Math.max(2, first?.dose_amount || 1)
+        : first?.dose_amount || 1;
+      const beforeCount = medicine?.total_pills ?? 20;
+      const removedBy: Record<DoseOutcome, number | null> = {
+        taken: dose, partial: dose - 1, over_dose: dose + 1,
+        not_taken: 0, refilled: -5, unverified: null,
+      };
+      const removed = removedBy[outcome];
+      return NextResponse.json(
+        flexDoseResult({
+          outcome,
+          time: first ? hhmm(first.time) : '08:00',
+          openedAt: '08:03',
+          openSeconds: 7,
+          medicineName: medicine?.name || 'ยาประจำตัว',
+          doseAmount: dose,
+          pillsBefore: removed === null ? null : beforeCount,
+          pillsAfter: removed === null ? null : beforeCount - removed,
+          removed,
+          foreign: outcome === 'over_dose' ? 'ไกวเฟนิซิน 4 เม็ด' : null,
+          stable: true,
+          imageCount: 3,
         }),
       );
     }
