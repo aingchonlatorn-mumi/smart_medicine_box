@@ -32,12 +32,35 @@ export interface Box {
   created_at?: string;
 }
 
+/**
+ * ผลการตีความหนึ่งครั้งที่ปิดฝา — ตัดสินจากจำนวนเม็ดยาที่หายไป ไม่ใช่จากการเปิดฝา
+ *   taken       หายไปเท่าที่ตารางกำหนด
+ *   partial     หายไปน้อยกว่าที่กำหนด แต่มากกว่าศูนย์
+ *   over_dose   หายไปมากกว่าที่กำหนด
+ *   not_taken   จำนวนไม่เปลี่ยน = เปิดดูเฉย ๆ ไม่ได้หยิบยา
+ *   refilled    จำนวนเพิ่มขึ้น = มีคนเติมยา
+ *   unverified  ยังไม่มีผลจากโมเดล จึงใช้เกณฑ์เดิมคือเปิดฝาตรงเวลามื้อ
+ */
+export type DoseOutcome =
+  | 'taken' | 'partial' | 'over_dose' | 'not_taken' | 'refilled' | 'unverified';
+
 export interface Medicine {
   medicine_id: string;
   user_id: string;
+  /** รหัสยาในรายการที่ระบบรองรับ (medicine_catalog) — ดู lib/medicines.ts
+   *  null ได้เฉพาะแถวที่รอผู้ใช้ยืนยัน (confirmed = false) */
+  code: string | null;
+  /** ชื่อที่ใช้แสดง มาจากรายการยา ไม่ใช่ข้อความอิสระที่ผู้ใช้พิมพ์ */
   name: string;
   total_pills: number;
   expire_date: string | null;
+  /** ยอดคงเหลือปัจจุบันมาจากไหน — ผู้ใช้กรอกเอง หรือกล้องนับให้ */
+  count_source: 'manual' | 'camera';
+  last_counted_at: string | null;
+  /** false = รายการที่กล้องสร้างไว้ตอนสแกนครั้งแรก รอผู้ใช้ตรวจสอบ */
+  confirmed: boolean;
+  /** ผลดิบจากการสแกนครั้งแรก */
+  detection: Record<string, unknown> | null;
   created_at?: string;
 }
 
@@ -74,6 +97,13 @@ export interface DoseLog {
   /** null = ยังไม่ได้ประมวลผลภาพ */
   hand_detected: boolean | null;
   confirmed_by: ConfirmedBy | null;
+  /* --- การนับเม็ดยาด้วยกล้อง --- */
+  /** จำนวนที่นับได้ก่อนมื้อนี้ (ยอดจากการนับครั้งก่อน) */
+  pills_before: number | null;
+  /** จำนวนที่นับได้หลังปิดฝาในมื้อนี้ — ต่างจาก pills_before เท่าไรคือจำนวนที่หยิบไป */
+  pills_after: number | null;
+  /** ผลดิบจากโมเดล: per_class, frames, outcome */
+  detection: Record<string, unknown> | null;
   created_at?: string;
 }
 
