@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { hasServiceRole, supabaseAdmin } from '@/lib/supabase-server';
+import { visionEnabled } from '@/lib/vision';
 import { bangkokParts } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
@@ -13,6 +14,8 @@ export async function GET() {
     line_token: Boolean(process.env.LINE_CHANNEL_ACCESS_TOKEN),
     app_url: process.env.NEXT_PUBLIC_APP_URL || null,
     cron_secret: Boolean(process.env.CRON_SECRET),
+    // บอกว่าระบบนับเม็ดยาจากภาพได้หรือยัง ถ้าเป็น false ผลทุกครั้งจะเป็น unverified
+    vision_service: visionEnabled(),
   };
 
   try {
