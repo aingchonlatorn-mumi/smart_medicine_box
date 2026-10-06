@@ -118,6 +118,8 @@ export async function recordDeviceEvent(params: {
   eventType: 'lid_open' | 'lid_close' | 'boot' | 'heartbeat' | 'error';
   occurredAt?: string;
   lidOpenSeconds?: number | null;
+  /** ระยะเวลาเปิดฝาตามที่บอร์ดวัดได้ ความละเอียดระดับมิลลิวินาที */
+  lidOpenMs?: number | null;
   logId?: string | null;
   detail?: Record<string, unknown> | null;
 }): Promise<string | null> {
@@ -126,6 +128,7 @@ export async function recordDeviceEvent(params: {
     event_type: params.eventType,
     occurred_at: params.occurredAt ?? new Date().toISOString(),
     lid_open_seconds: params.lidOpenSeconds ?? null,
+    lid_open_ms: params.lidOpenMs ?? null,
     log_id: params.logId ?? null,
     detail: params.detail ?? null,
   });

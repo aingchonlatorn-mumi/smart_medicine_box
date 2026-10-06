@@ -1,28 +1,46 @@
 import { NextResponse } from 'next/server';
 import { jsonError, userIdFrom } from '@/lib/api';
 import { supabaseAdmin } from '@/lib/supabase-server';
+import { medicineByCode } from '@/lib/medicines';
 
 export const dynamic = 'force-dynamic';
 
-/** แก้ข้อมูลยา (ชื่อ / จำนวนเม็ด / วันหมดอายุ) — ถ้ายังไม่มีจะสร้างให้ */
+/**
+ * แก้ข้อมูลยา (ชนิด / จำนวนเม็ด / วันหมดอายุ) — ถ้ายังไม่มีจะสร้างให้
+ *
+ * ชนิดยารับเป็นรหัสจากรายการที่ระบบรองรับเท่านั้น ชื่อที่แสดงถูกเติมให้จากรายการ
+ * ไม่รับชื่อที่พิมพ์เอง เพราะยาที่โมเดลไม่รู้จักจะยืนยันการทานยาด้วยภาพไม่ได้
+ */
 export async function PUT(req: Request) {
   const userId = userIdFrom(req);
   if (!userId) return jsonError('ยังไม่ได้เข้าสู่ระบบ', 401);
 
   try {
     const body = await req.json();
-    const name = (body.name || '').trim();
-    if (!name) return jsonError('กรุณากรอกชื่อยา');
+    const type = medicineByCode((body.code || '').trim());
+    if (!type) return jsonError('กรุณาเลือกชนิดยาจากรายการที่ระบบรองรับ');
 
     const totalPills = Math.max(0, Number(body.total_pills ?? 0));
     const expireDate = body.expire_date || null;
     const db = supabaseAdmin();
 
-    if (body.medicine_id) {
+    // กล่องหนึ่งใบรองรับยาชนิดเดียว ผู้ใช้จึงมีรายการยาได้รายการเดียว
+    // ถ้าผู้เรียกไม่ได้ระบุรหัสมา ให้หาของเดิมมาแก้แทนการเพิ่มรายการใหม่
+    // ไม่งั้นจะเกิดแถวซ้ำที่ระบบมองไม่เห็น เพราะส่วนอื่นอ่านเฉพาะรายการแรก
+    let medicineId: string | null = body.medicine_id || null;
+    if (!medicineId) {
+      const { data: existing } = await db
+        .from('medicines').select('medicine_id')
+        .eq('user_id', userId).order('created_at', { ascending: true })
+        .limit(1).maybeSingle();
+      medicineId = existing?.medicine_id ?? null;
+    }
+
+    if (medicineId) {
       const { data, error } = await db
         .from('medicines')
-        .update({ name, total_pills: totalPills, expire_date: expireDate })
-        .eq('medicine_id', body.medicine_id)
+        .update({ code: type.code, name: type.nameTh, total_pills: totalPills, expire_date: expireDate })
+        .eq('medicine_id', medicineId)
         .eq('user_id', userId)
         .select()
         .single();
@@ -32,7 +50,10 @@ export async function PUT(req: Request) {
 
     const { data, error } = await db
       .from('medicines')
-      .insert({ user_id: userId, name, total_pills: totalPills, expire_date: expireDate })
+      .insert({
+        user_id: userId, code: type.code, name: type.nameTh,
+        total_pills: totalPills, expire_date: expireDate,
+      })
       .select()
       .single();
     if (error) return jsonError(`บันทึกไม่สำเร็จ: ${error.message}`, 500);

@@ -2,7 +2,7 @@
 // ใช้ร่วมกันทั้งฝั่ง cron (ตัดสินใจส่งแจ้งเตือน) และฝั่ง UI (แสดงไทม์ไลน์)
 // แก้ที่เดียว ทั้งสองฝั่งตรงกันเสมอ
 
-import type { DoseLog, DoseState, MealRelation, Schedule } from './types';
+import type { DoseLog, DoseOutcome, DoseState, MealRelation, Schedule } from './types';
 import {
   DOW_KEYS, bangkokDateTime, bangkokParts, bangkokToday,
   dateOf, daysBetween, hhmm, minutesOfDay,
@@ -189,6 +189,18 @@ export interface DoseSlot {
   state: DoseState;
   delay_minutes: number | null;
   image_url: string | null;
+  /**
+   * ผลการตีความจากภาพ — ละเอียดกว่า state ซึ่งมีแค่ทานแล้ว/เลท/ขาด/รอ
+   * เช่น มื้อที่หยิบยาไม่ครบยังนับว่าทานแล้ว แต่ต้องแสดงให้ผู้ดูแลเห็นว่าไม่ครบ
+   * null = ยังไม่มีผลจากแบบจำลอง
+   */
+  outcome: DoseOutcome | null;
+}
+
+/** อ่านผลการตีความที่เก็บไว้ในคอลัมน์ detection ของ log */
+function outcomeOf(log: DoseLog | undefined | null): DoseOutcome | null {
+  const value = (log?.detection as { outcome?: unknown } | null)?.outcome;
+  return typeof value === 'string' ? (value as DoseOutcome) : null;
 }
 
 /**
@@ -236,6 +248,7 @@ export function slotsForDate(params: {
             ),
       delay_minutes: log ? delayMinutes(log) : null,
       image_url: log?.image_url ?? null,
+      outcome: outcomeOf(log),
     };
   });
 
@@ -256,6 +269,7 @@ export function slotsForDate(params: {
       state: doseState(log, at),
       delay_minutes: delayMinutes(log),
       image_url: log.image_url,
+      outcome: outcomeOf(log),
     }));
 
   return [...fromSchedules, ...orphans].sort((a, b) =>
